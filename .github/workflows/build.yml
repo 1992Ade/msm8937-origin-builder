@@ -1,0 +1,79 @@
+name: Build MSM8937 Kernel with OriginSU
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32z1-dev liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python3-pip
+
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 https://github.com/Mi-Thorium/kernel_msm-4.19 -b mithorium/a13/master kernel_source
+
+      - name: Automatic Integration of OriginSU
+        run: |
+          cd kernel_source
+          
+          # Exécution de la commande officielle recommandée par OriginSU
+          curl -LSs "https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh" | bash -
+
+      - name: Download Toolchain (GCC ARM64)
+        run: |
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 toolchain
+
+      - name: Build Kernel
+        run: |
+          cd kernel_source
+          
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$(pwd)/../toolchain/bin:$PATH"
+          export CROSS_COMPILE=aarch64-linux-android-
+          
+          # Génération de la configuration GKI
+          make gki_defconfig
+          
+          # Activation d'OriginSU et de KPM (recommandé pour les noyaux 64-bit)
+          echo "CONFIG_KSU=y" >> .config
+          echo "CONFIG_KPM=y" >> .config
+          
+          # Compilation du noyau
+          make -j$(nproc --all)
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 -b master anykernel
+          rm -rf anykernel/.git
+          
+          if [ -f "kernel_source/arch/arm64/boot/Image.gz-dtb" ]; then
+            cp kernel_source/arch/arm64/boot/Image.gz-dtb anykernel/
+          elif [ -f "kernel_source/arch/arm64/boot/Image.gz" ]; then
+            cp kernel_source/arch/arm64/boot/Image.gz anykernel/
+          elif [ -f "kernel_source/arch/arm64/boot/Image" ]; then
+            cp kernel_source/arch/arm64/boot/Image anykernel/
+          fi
+          
+          cd anykernel
+          zip -r9 ../MSM8937-OriginSU-Kernel.zip *
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MSM8937-OriginSU-Kernel
+          path: MSM8937-OriginSU-Kernel.zip
