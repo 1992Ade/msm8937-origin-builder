@@ -31,11 +31,15 @@ jobs:
           cd kernel_source
           curl -LSs "https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh" | bash -
 
-      - name: Download Clang Toolchain & GCC Prefixes
+      - name: Download AOSP Clang & GCC Toolchains
         run: |
-          # Toolchain Clang AOSP
-          git clone --depth=1 https://gitlab.com/sarthakroy2002/clang-r416183b.git clang
-          # Cross-compilateurs GCC requis par Clang pour l'architecture 64/32-bit
+          # Clang officiel AOSP (r416183b / Clang 12)
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b android12-release clang_all
+          mkdir clang
+          cp -r clang_all/clang-r416183b/* clang/
+          rm -rf clang_all
+
+          # Cross-compilateurs GCC requis pour l'architecture ARM64 / ARM32
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
 
@@ -49,7 +53,7 @@ jobs:
           # Configuration des chemins d'accès
           export PATH="$(pwd)/../clang/bin:$(pwd)/../gcc64/bin:$(pwd)/../gcc32/bin:$PATH"
           
-          # Variables de compilation Clang pour le noyau Linux
+          # Cibles de compilation Clang
           export CC=clang
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
