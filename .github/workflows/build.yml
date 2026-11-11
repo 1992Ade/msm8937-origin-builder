@@ -29,23 +29,23 @@ jobs:
       - name: Automatic Integration of OriginSU
         run: |
           cd kernel_source
-          # Exécution de la commande officielle d'intégration d'OriginSU à la racine du noyau
           curl -LSs "https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh" | bash -
 
-      - name: Configure Kernel Options (KSU & KPM)
+      - name: Configure Kernel Options & Fix Missing Staging Driver
         run: |
           cd kernel_source
           
-          # Activation de CONFIG_KSU et CONFIG_KPM dans le gki_defconfig ciblé
+          # 1. Neutraliser la référence au dossier 'prima' manquant dans drivers/staging/Kconfig
+          if [ -f "drivers/staging/Kconfig" ]; then
+            sed -i '/source "drivers\/staging\/prima\/Kconfig"/d' drivers/staging/Kconfig
+            sed -i '/prima/d' drivers/staging/Kconfig || true
+          fi
+
+          # 2. Injecter CONFIG_KSU et CONFIG_KPM dans le defconfig GKI
           DEFCONFIG_PATH="arch/arm64/configs/gki_defconfig"
-          
           if [ -f "$DEFCONFIG_PATH" ]; then
             echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
             echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
-          else
-            # Fallback si le defconfig est localisé ailleurs dans le tree
-            echo "CONFIG_KSU=y" >> .config
-            echo "CONFIG_KPM=y" >> .config
           fi
 
       - name: Build GKI Kernel
@@ -55,7 +55,7 @@ jobs:
           export KBUILD_BUILD_USER="builder"
           export KBUILD_BUILD_HOST="github-actions"
           
-          # Compilation via le script de build Android GKI fourni par la source
+          # Lancement de la compilation GKI
           BUILD_CONFIG=build.config.gki.aarch64 ./build/build.sh
 
       - name: Package with AnyKernel3
