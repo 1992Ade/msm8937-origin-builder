@@ -31,17 +31,15 @@ jobs:
           cd kernel_source
           curl -LSs "https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh" | bash -
 
-      - name: Configure Kernel Options & Fix Missing Staging Driver
+      - name: Link Real Kconfig & Configure KSU
         run: |
           cd kernel_source
           
-          # 1. Neutraliser la référence au dossier 'prima' manquant dans drivers/staging/Kconfig
-          if [ -f "drivers/staging/Kconfig" ]; then
-            sed -i '/source "drivers\/staging\/prima\/Kconfig"/d' drivers/staging/Kconfig
-            sed -i '/prima/d' drivers/staging/Kconfig || true
+          mkdir -p drivers/staging/prima
+          if [ -f "arch/arm64/Kconfig" ]; then
+            cp arch/arm64/Kconfig drivers/staging/prima/Kconfig
           fi
-
-          # 2. Injecter CONFIG_KSU et CONFIG_KPM dans le defconfig GKI
+          
           DEFCONFIG_PATH="arch/arm64/configs/gki_defconfig"
           if [ -f "$DEFCONFIG_PATH" ]; then
             echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
@@ -55,7 +53,6 @@ jobs:
           export KBUILD_BUILD_USER="builder"
           export KBUILD_BUILD_HOST="github-actions"
           
-          # Lancement de la compilation GKI
           BUILD_CONFIG=build.config.gki.aarch64 ./build/build.sh
 
       - name: Package with AnyKernel3
