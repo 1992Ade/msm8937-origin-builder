@@ -4,9 +4,9 @@ name: Build MSM8937 Kernel (Mi-Thorium) with OriginSU
 # BakaSU remplacé par OriginSU, même méthode de hooks (JackA1ltman NonGKI patches).
 
 on:
-  # Vérifie chaque jour si une nouvelle release OriginSU est sortie
+  # Vérifie chaque dimanche (05:17 UTC) si une nouvelle release OriginSU est sortie
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 5 * * 0"
   workflow_dispatch:
     inputs:
       originsu_ref:
@@ -205,6 +205,16 @@ jobs:
           # 1) Setup OriginSU (clone dans ./KernelSU + lien drivers/kernelsu)
           curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
             | bash -s "$ORIGINSU_TAG"
+
+          # 1b) Correctif OriginSU non-GKI : ksud_integration.c appelle ksu_preinit_release()
+          #     mais n'inclut preinit.h qu'en mode Tracepoint/Tamper (GKI). En SuSFS/Manual,
+          #     le stub inline (KSU_NO_PREINIT) n'est pas vu -> "undefined symbol" au link.
+          F=KernelSU/kernel/runtime/ksud_integration.c
+          if [ -f "$F" ] && grep -q 'ksu_preinit_release' "$F" && \
+             ! sed -n '1,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/p' "$F" | grep -q '^#include "preinit/preinit.h"'; then
+            sed -i '0,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/s//#include "preinit\/preinit.h" \/\/ fix non-GKI link\n&/' "$F"
+            echo "-> preinit.h inclus sans condition dans $F"
+          fi
 
           # 2) Configs communes (mêmes symboles que BakaSU)
           cat >> "$FINAL_DEFCONFIG" <<'EOF'
