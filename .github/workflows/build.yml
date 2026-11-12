@@ -4,21 +4,30 @@ name: Build MSM8937 Kernel (Mi-Thorium) with OriginSU
 # BakaSU remplacé par OriginSU, même méthode de hooks (JackA1ltman NonGKI patches).
 
 on:
+  # Vérifie chaque jour si une nouvelle release OriginSU est sortie
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
     inputs:
-      hook_mode:
-        description: "Mode de hook OriginSU"
-        type: choice
-        options: [susfs, manual]
-        default: susfs
+      originsu_ref:
+        description: "Tag OriginSU à compiler (vide = dernière release)"
+        required: false
+        default: ""
       kpm:
         description: "Activer CONFIG_KPM"
         type: boolean
         default: true
-      originsu_ref:
-        description: "Tag/branche/commit OriginSU (vide = dernier tag)"
-        required: false
-        default: ""
+      publish:
+        description: "Publier une release GitHub"
+        type: boolean
+        default: true
+
+concurrency:
+  group: kernel-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   KERNEL_DIR: android_kernel_xiaomi_msm8937
@@ -29,8 +38,59 @@ env:
   MAKE_ARGS: ARCH=arm64 LLVM=1 LLVM_IAS=1 LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 jobs:
+  # ------------------------------------------------------------------
+  # 1) Faut-il compiler ? (nouvelle version OriginSU non encore publiée)
+  # ------------------------------------------------------------------
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      build: ${{ steps.ver.outputs.build }}
+    steps:
+      - name: Compare OriginSU latest release with our releases
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.originsu_ref }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo samakshkambxj/OriginSU --json tagName -q .tagName 2>/dev/null || true)
+          fi
+          if [ -z "$TAG" ]; then
+            # Pas de release publiée : on se rabat sur le tag le plus récent
+            TAG=$(gh api repos/samakshkambxj/OriginSU/tags -q '.[0].name')
+          fi
+          [ -n "$TAG" ] || { echo "::error::Impossible de déterminer la version OriginSU"; exit 1; }
+          echo "OriginSU version : $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Lancement manuel -> build forcé"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "originsu-$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release originsu-$TAG déjà publiée -> rien à faire"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nouvelle version détectée -> build"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # 2) Compilation (SUSFS inline hook + manual hook)
+  # ------------------------------------------------------------------
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest   # Neutron Clang a besoin d'une glibc récente (24.04)
+    strategy:
+      fail-fast: false
+      matrix:
+        hook_mode: [susfs, manual]
+    env:
+      ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
+      HOOK_MODE: ${{ matrix.hook_mode }}
+      # Planifié : inputs vides -> KPM activé par défaut
+      KPM: ${{ github.event_name == 'schedule' && 'true' || inputs.kpm }}
 
     steps:
       - name: Install build dependencies
@@ -139,7 +199,7 @@ jobs:
 
           # 1) Setup OriginSU (clone dans ./KernelSU + lien drivers/kernelsu)
           curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
-            | bash -s ${{ inputs.originsu_ref }}
+            | bash -s "$ORIGINSU_TAG"
 
           # 2) Configs communes (mêmes symboles que BakaSU)
           cat >> "$FINAL_DEFCONFIG" <<'EOF'
@@ -148,11 +208,11 @@ jobs:
           CONFIG_HAVE_SYSCALL_TRACEPOINTS=y
           CONFIG_THREAD_INFO_IN_TASK=y
           EOF
-          if [ "${{ inputs.kpm }}" = "true" ]; then
+          if [ "$KPM" = "true" ]; then
             echo "CONFIG_KPM=y" >> "$FINAL_DEFCONFIG"
           fi
 
-          if [ "${{ inputs.hook_mode }}" = "susfs" ]; then
+          if [ "$HOOK_MODE" = "susfs" ]; then
             # 3a) SUSFS : patch noyau + hooks inline SUSFS
             curl -LSs --fail --retry 3 "$NONGKI/Patch/susfs_patch_to_${KERNEL_VERSION}.patch" | patch -p1 -s --fuzz=5 || true
             cat >> "$FINAL_DEFCONFIG" <<'EOF'
@@ -218,13 +278,71 @@ jobs:
           sed -i 's/device.name2=sweetin/device.name2=mi8917/' AnyKernel3/anykernel.sh
           sed -i '/device.name2=mi8917/a device.name3=santoni\ndevice.name4=prada\ndevice.name5=rolex\ndevice.name6=ugglite\ndevice.name7=riva\ndevice.name8=ugg\ndevice.name9=land' AnyKernel3/anykernel.sh
           cd AnyKernel3
-          zip -rq9 "../MSM8937-OriginSU-$(date +%Y%m%d).zip" ./*
+          ZIP="MSM8937-OriginSU-${ORIGINSU_TAG}-${HOOK_MODE}-$(date +%Y%m%d).zip"
+          zip -rq9 "../$ZIP" ./*
+          cd ..
+          mkdir -p dist
+          mv "$ZIP" dist/
+          cp "$KERNEL_DIR/out/.config" "dist/config-${HOOK_MODE}.txt"
+          cp "$KERNEL_DIR/build.log"   "dist/build-${HOOK_MODE}.log"
+          echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse --short HEAD)" > "dist/info-${HOOK_MODE}.txt"
+          echo "KERNEL_RELEASE=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null)" >> "dist/info-${HOOK_MODE}.txt"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MSM8937-OriginSU-Kernel
-          path: |
-            *.zip
-            ${{ env.KERNEL_DIR }}/build.log
-            ${{ env.KERNEL_DIR }}/out/.config
+          name: MSM8937-OriginSU-${{ matrix.hook_mode }}
+          path: dist/*
+
+  # ------------------------------------------------------------------
+  # 3) Publication de la release GitHub
+  # ------------------------------------------------------------------
+  release:
+    needs: [check, build]
+    # Publie même si une seule des deux variantes a compilé
+    if: >-
+      !cancelled() && needs.check.outputs.build == 'true' &&
+      (github.event_name == 'schedule' || inputs.publish)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: originsu-${{ needs.check.outputs.tag }}
+      ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          source dist/info-susfs.txt 2>/dev/null || source dist/info-manual.txt
+          cat > notes.md <<EOF
+          ## MSM8937 kernel — OriginSU \`${ORIGINSU_TAG}\`
+
+          | | |
+          |---|---|
+          | OriginSU | [${ORIGINSU_TAG}](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}) |
+          | Kernel | Mi-Thorium \`mithorium/a13/master\` @ [\`${KERNEL_COMMIT}\`](https://github.com/Mi-Thorium/kernel_msm-4.19/commit/${KERNEL_COMMIT}) |
+          | Kernel version | \`${KERNEL_RELEASE}\` |
+          | Build date | $(date -u +%Y-%m-%d) |
+
+          ### Which zip should I flash?
+          - **\`-susfs\`** — SuSFS inline hook: root + SuSFS hiding (recommended).
+          - **\`-manual\`** — Manual hook only: try this if the SuSFS build does not boot.
+
+          Flash from TWRP / OrangeFox, then install the OriginSU manager from the
+          [OriginSU release page](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}).
+          **Back up your stock \`boot\` partition first.**
+          EOF
+          sed -i 's/^          //' notes.md
+
+      - name: Create (or replace) the release
+        run: |
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "MSM8937 OriginSU ${ORIGINSU_TAG}" \
+            --notes-file notes.md --latest \
+            dist/*.zip dist/config-*.txt
