@@ -7,7 +7,7 @@
 
 ## 📱 About This Repository
 
-This repository automates the compilation of a custom **Linux 4.19** kernel for **MSM8937** (Snapdragon 430/435) Xiaomi devices, based on the [Mi-Thorium](https://github.com/Mi-Thorium) kernel tree.
+This repository automates the compilation of a custom **Linux 4.19** kernel for **MSM8937** (Snapdragon 430/435) Xiaomi devices, based on the [Mi-Thorium](https://github.com/Mi-Thorium) kernel tree. Check out **[riarumoda](https://github.com/riarumoda/perf_neon-builder)** for the original work with BakaSU implementation, other devices and Custom ROM suggestions.
 
 Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution and is packaged as a recovery-flashable `.zip` (TWRP / OrangeFox) with AnyKernel3.
 
