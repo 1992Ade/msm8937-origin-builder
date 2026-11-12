@@ -1,7 +1,7 @@
 # MSM8937 Kernel Builder with OriginSU
 
-[![Build](https://img.shields.io/badge/build-GitHub%20Actions-blue?logo=github-actions&logoColor=white)](../../actions/workflows/build-kernel.yml)
-[![Latest release](https://img.shields.io/github/v/release/1992Ade/msm8937-origin-builder?label=latest&logo=github)](../../releases/latest)
+[![Build](https://img.shields.io/badge/build-GitHub%20Actions-blue?logo=github-actions&logoColor=white)](https://github.com/1992Ade/msm8937-origin-builder/actions/workflows/build-kernel.yml)
+[![Latest release](https://img.shields.io/github/v/release/1992Ade/msm8937-origin-builder?label=latest&logo=github)](https://github.com/1992Ade/msm8937-origin-builder/releases/latest)
 
 > **Your warranty is now void.** Flashing a custom kernel can brick your device. You are responsible for what you flash. Always keep a backup of your stock `boot` partition.
 
@@ -50,7 +50,7 @@ The full kernel `.config` of each variant is attached to the release for referen
 
 0. **Coming from Magisk, APatch, BakaSU or another KernelSU?** Read [this warning](#️-coming-from-another-root-solution) first.
 1. Back up your stock `boot` partition (from TWRP/OrangeFox, or keep the `boot.img` of your ROM).
-2. Download the zip from the [latest release](../../releases/latest).
+2. Download the zip from the [latest release](https://github.com/1992Ade/msm8937-origin-builder/releases/latest).
 3. Reboot to recovery and flash it (or `adb sideload <file>.zip`).
 4. If you use the bootloader bypass exploit on MSM8937, flash the **appender** after the kernel.
 5. Reboot to system.
