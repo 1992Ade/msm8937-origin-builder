@@ -29,6 +29,11 @@ concurrency:
 permissions:
   contents: read
 
+# bash -eo pipefail : une erreur de make dans "make | tee" fait échouer l'étape
+defaults:
+  run:
+    shell: bash
+
 env:
   KERNEL_DIR: android_kernel_xiaomi_msm8937
   KERNEL_VERSION: "4.19"
@@ -265,7 +270,34 @@ jobs:
           { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
           echo "--- OriginSU configs effectives ---"
           grep -E '^CONFIG_(KSU|KPM)' out/.config || true
+          set +e
           make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "--- Contenu de out/arch/arm64/boot ---"
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(dossier absent)"
+
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::La compilation a échoué (make code $RC). Premières erreurs :"
+            grep -nE "error:|Error [0-9]|undefined reference|\*\*\*" build.log | head -n 40 || true
+            exit "$RC"
+          fi
+          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "::error::Compilation OK mais pas d'Image.gz-dtb."
+            grep -E "APPENDED_DTB|CONFIG_BUILD_ARM64_DT_OVERLAY|CONFIG_ARCH_MSM8937" out/.config || true
+            exit 1
+          fi
+
+      - name: Upload build log (même en cas d'échec)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.hook_mode }}
+          path: |
+            ${{ env.KERNEL_DIR }}/build.log
+            ${{ env.KERNEL_DIR }}/out/.config
+          if-no-files-found: ignore
 
       - name: Package with AnyKernel3
         run: |
