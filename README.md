@@ -29,7 +29,7 @@ Same device family as the Mi-Thorium `mi89x7` target:
 | Redmi Note 5A Lite / Y1 Lite | `ugglite` |
 | Redmi Note 5A Prime / Y1 Prime | `ugg` |
 
-**Requirement:** a ROM that runs on the Mi-Thorium **4.19** kernel (Android 11 and newer).
+**Requirement:** a ROM that runs on the Mi-Thorium **4.19** kernel (Android 11 and newer). I suggest  **[/e/OS for Redmi 3S/Mi8937](https://doc.e.foundation/devices/Mi8937/)**.
 
 ---
 
