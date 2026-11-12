@@ -1,79 +1,230 @@
-name: Build MSM8937 Kernel with OriginSU
+name: Build MSM8937 Kernel (Mi-Thorium) with OriginSU
+
+# Adapté de riarumoda/perf_neon-builder (.github/workflows/mithorium-msm8937.yml)
+# BakaSU remplacé par OriginSU, même méthode de hooks (JackA1ltman NonGKI patches).
 
 on:
   workflow_dispatch:
+    inputs:
+      hook_mode:
+        description: "Mode de hook OriginSU"
+        type: choice
+        options: [susfs, manual]
+        default: susfs
+      kpm:
+        description: "Activer CONFIG_KPM"
+        type: boolean
+        default: true
+      originsu_ref:
+        description: "Tag/branche/commit OriginSU (vide = dernier tag)"
+        required: false
+        default: ""
+
+env:
+  KERNEL_DIR: android_kernel_xiaomi_msm8937
+  KERNEL_VERSION: "4.19"
+  DEVICE: mi89x7
+  KBUILD_BUILD_USER: builder
+  KBUILD_BUILD_HOST: github-actions
+  MAKE_ARGS: ARCH=arm64 LLVM=1 LLVM_IAS=1 LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-22.04
+  build:
+    runs-on: ubuntu-latest   # Neutron Clang a besoin d'une glibc récente (24.04)
 
     steps:
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@v10
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-
-      - name: Install Build Dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32z1-dev liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python3-pip repo
+          sudo apt-get install -y bc build-essential bison flex zip p7zip-full curl git wget \
+            libssl-dev zstd lld python3 patchutils ccache libc6-dev unzip
 
-      - name: Clone Kernel Source
+      - name: Clone kernel + extra repositories (comme perf_neon)
         run: |
-          git clone --depth=1 https://github.com/Mi-Thorium/kernel_msm-4.19 -b mithorium/a13/master kernel_source
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
-      - name: Automatic Integration of OriginSU
-        run: |
-          cd kernel_source
-          curl -LSs "https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh" | bash -
+          git clone --depth=1 -b mithorium/a13/master https://github.com/Mi-Thorium/kernel_msm-4.19.git "$KERNEL_DIR"
+          cd "$KERNEL_DIR"
 
-      - name: Link Real Kconfig & Configure KSU
+          clone() { echo "-> $3"; git clone --depth=1 -b "$2" "$1" "$3"; }
+          # Device trees
+          clone https://github.com/Mi-Thorium/kernel_devicetree_msm-4.19.git      dts/master                       arch/arm64/boot/dts/vendor-legacy
+          clone https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-msm8937.git dts/mi8937/4.19/master          arch/arm64/boot/dts/xiaomi-msm8937
+          # SDM439 : requis car référencé par les Kconfig/Makefile du tree
+          clone https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-sdm439.git  dts/mi439/4.19/master           arch/arm64/boot/dts/xiaomi-sdm439
+          # Techpacks
+          clone https://github.com/Mi-Thorium/kernel_techpack_xiaomi-msm8937.git   techpack/mi8937/4.19/master      techpack/xiaomi-msm8937
+          clone https://github.com/Mi-Thorium/kernel_techpack_xiaomi-sdm439.git    techpack/mi439/4.19/master       techpack/xiaomi-sdm439
+          clone https://github.com/Mi-Thorium/kernel_techpack_audio-legacy.git     audio/4.19/mithorium/master      techpack/audio-legacy
+          clone https://github.com/Mi-Thorium/kernel_techpack_camera-legacy.git    camera/LA.UM.8.6.r1-05300-89xx.0/4.19/mithorium techpack/camera-legacy
+          clone https://github.com/Mi-Thorium/kernel_techpack_camera-legacy.git    camera/LA.UM.5.3-10610-89xx.0/4.19/mithorium   techpack/camera-legacy-m
+          # >>> C'est ça qui corrige l'erreur drivers/staging/prima/Kconfig <<<
+          clone https://github.com/Mi-Thorium/vendor_qcom_opensource_wlan_prima.git wlan/LA.UM.9.6.4/mithorium/master drivers/staging/prima
+
+      - name: Download Neutron Clang
         run: |
-          cd kernel_source
-          
-          mkdir -p drivers/staging/prima
-          if [ -f "arch/arm64/Kconfig" ]; then
-            cp arch/arm64/Kconfig drivers/staging/prima/Kconfig
+          TC_URL="$(curl -fsSL --retry 5 --retry-all-errors -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest \
+            | grep -o '"browser_download_url": *"[^"]*"' | head -n1 | cut -d '"' -f4)"
+          [ -n "$TC_URL" ] || { echo "Toolchain URL introuvable"; exit 1; }
+          mkdir -p "$KERNEL_DIR/clang"
+          curl -fL --retry 5 --retry-all-errors -o /tmp/clang.tar.zst "$TC_URL"
+          tar --zstd -C "$KERNEL_DIR/clang" -xf /tmp/clang.tar.zst
+          rm -f /tmp/clang.tar.zst
+          echo "$PWD/$KERNEL_DIR/clang/bin" >> "$GITHUB_PATH"
+
+      - name: Generate kernel config
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          MAIN_DEFCONFIG="vendor/msm8937-perf_defconfig"
+          COMMON_FRAGS="vendor/msm8937-legacy.config vendor/common.config vendor/msm-clk.config"
+          DEVICE_FRAGS="vendor/xiaomi/msm8937/common.config vendor/xiaomi/msm8937/mi8937.config"
+          FEATURE_FRAGS="vendor/feature/android-12.config vendor/feature/compat-vdso.config vendor/feature/erofs.config vendor/feature/exfat.config vendor/feature/kprobes.config vendor/feature/lmkd.config vendor/feature/ntfs.config vendor/feature/wireguard.config"
+
+          make O=out $MAKE_ARGS "$MAIN_DEFCONFIG"
+          for f in $COMMON_FRAGS $DEVICE_FRAGS $FEATURE_FRAGS; do
+            if [ -f "arch/arm64/configs/$f" ]; then
+              echo "-> merge $f"; cat "arch/arm64/configs/$f" >> out/.config
+            else
+              echo "::warning::fragment absent : $f"
+            fi
+          done
+          { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
+          { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS silentoldconfig || true
+
+          cp out/.config "arch/arm64/configs/${DEVICE}_stock_defconfig"
+          cp out/.config "arch/arm64/configs/${DEVICE}_defconfig"
+          rm -rf out
+          echo "FINAL_DEFCONFIG=arch/arm64/configs/${DEVICE}_defconfig" >> "$GITHUB_ENV"
+          echo "COMPILE_DEFCONFIG=${DEVICE}_defconfig" >> "$GITHUB_ENV"
+          sed -i "s|\$(KCONFIG_CONFIG)|arch/arm64/configs/${DEVICE}_stock_defconfig|g" kernel/Makefile
+
+      - name: Device patches (comme perf_neon)
+        working-directory: ${{ env.KERNEL_DIR }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Annule le KernelSU déjà intégré dans le tree Mi-Thorium (sinon conflit avec OriginSU)
+          curl -sL --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.patch" \
+            https://api.github.com/repos/Mi-Thorium/kernel_msm-4.19/commits/624875e8edc36ae280b1f8efc1d3c48a28da64ea \
+            -o /tmp/ksu_revert.patch
+          patch -R -s -p1 < /tmp/ksu_revert.patch
+
+          sed -i "s/printf '%s' -dirty/:/g" scripts/setlocalversion
+          sed -i 's/CONFIG_IKHEADERS=y/# CONFIG_IKHEADERS is not set/g' "$FINAL_DEFCONFIG"
+          cat >> "$FINAL_DEFCONFIG" <<'EOF'
+          CONFIG_LTO_CLANG=y
+          CONFIG_THINLTO=y
+          CONFIG_MODULE_REL_CRCS=y
+          CONFIG_SECURITY_SELINUX_DEVELOP=y
+          CONFIG_DM_CRYPT=y
+          CONFIG_DM_DEFAULT_KEY=y
+          CONFIG_DM_SNAPSHOT=y
+          CONFIG_DM_UEVENT=y
+          CONFIG_DM_VERITY=y
+          CONFIG_DM_VERITY_FEC=y
+          CONFIG_DM_BOW=y
+          EOF
+          sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
+
+          # Warnings bloquants avec Clang récent
+          sed -i 's/-Wno-format-security/-Wno-format-security -Wno-declaration-after-statement -Wno-implicit-int -Wno-enum-conversion -Wno-default-const-init-var-unsafe -Wno-default-const-init-field-unsafe -Wno-misleading-indentation -Wno-unsequenced -Wno-sizeof-pointer-memaccess -Wno-implicit-function-declaration -Wno-implicit-enum-enum-cast/g' Makefile
+          sed -i '/export KBUILD_CFLAGS/i KBUILD_CFLAGS += -mllvm -polly -mllvm -enable-gvn-hoist -Wno-unused-command-line-argument' Makefile
+
+      - name: Integrate OriginSU (à la place de BakaSU)
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          NONGKI=https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches
+
+          # 1) Setup OriginSU (clone dans ./KernelSU + lien drivers/kernelsu)
+          curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
+            | bash -s ${{ inputs.originsu_ref }}
+
+          # 2) Configs communes (mêmes symboles que BakaSU)
+          cat >> "$FINAL_DEFCONFIG" <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
+          CONFIG_HAVE_SYSCALL_TRACEPOINTS=y
+          CONFIG_THREAD_INFO_IN_TASK=y
+          EOF
+          if [ "${{ inputs.kpm }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> "$FINAL_DEFCONFIG"
           fi
-          
-          DEFCONFIG_PATH="arch/arm64/configs/gki_defconfig"
-          if [ -f "$DEFCONFIG_PATH" ]; then
-            echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
-            echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
-          fi
 
-      - name: Build GKI Kernel
+          if [ "${{ inputs.hook_mode }}" = "susfs" ]; then
+            # 3a) SUSFS : patch noyau + hooks inline SUSFS
+            curl -LSs --fail --retry 3 "$NONGKI/Patch/susfs_patch_to_${KERNEL_VERSION}.patch" | patch -p1 -s --fuzz=5 || true
+            cat >> "$FINAL_DEFCONFIG" <<'EOF'
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          EOF
+            # Correctif 4.19 de perf_neon (fs/namespace.c)
+            sed -i 's|^[[:space:]]*mnt = alloc_vfsmnt(fc->source ?: "none");|#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(fc->source ?: "none");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif|' fs/namespace.c
+            HOOK_SCRIPT="$NONGKI/susfs_inline_hook_patches.sh"
+          else
+            # 3b) Manual hook
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$FINAL_DEFCONFIG"
+            HOOK_SCRIPT="$NONGKI/syscall_hook_patches.sh"
+          fi
+          sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
+
+          # 4) Hooks dans les sources du noyau
+          curl -LSs --fail --retry 3 "$HOOK_SCRIPT" | bash
+
+          # 5) Correctif 4.19 de perf_neon (fs/stat.c)
+          sed -i 's/ksu_handle_stat(&dfd, &fname, &flag);/ksu_handle_stat(\&dfd, \&fname, \&flags);/g' fs/stat.c
+
+          # 6) Exporter les symboles SELinux statiques
+          unstatic() { [ -f "$1" ] && grep -q "static $2" "$1" && sed -i "s/static $2/$2/" "$1" && echo "  exported: $2" || true; }
+          unstatic security/selinux/selinuxfs.c   'ssize_t (\*write_op\[\])'
+          unstatic security/selinux/selinuxfs.c   'ssize_t (\*const write_op\[\])'
+          unstatic security/selinux/selinuxfs.c   'const struct file_operations sel_handle_status_ops'
+          unstatic security/selinux/selinuxfs.c   'DEFINE_MUTEX(sel_mutex);'
+          unstatic security/selinux/ss/status.c   'struct page \*selinux_status_page;'
+          unstatic security/selinux/ss/status.c   'DEFINE_MUTEX(selinux_status_lock);'
+          unstatic security/selinux/ss/services.c 'DEFINE_RWLOCK(policy_rwlock);'
+          unstatic security/selinux/ss/services.c 'void security_dump_masked_av'
+          unstatic security/selinux/ss/services.c 'void context_struct_compute_av'
+
+          sed -i 's/\$(KSU_COMMIT_SHA)-dirty/$(KSU_COMMIT_SHA)/' KernelSU/kernel/Kbuild 2>/dev/null || true
+
+      - name: Compile the kernel
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          cd kernel_source
-          
-          export KBUILD_BUILD_USER="builder"
-          export KBUILD_BUILD_HOST="github-actions"
-          
-          BUILD_CONFIG=build.config.gki.aarch64 ./build/build.sh
+          mkdir -p out
+          make O=out $MAKE_ARGS "$COMPILE_DEFCONFIG"
+          { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
+          echo "--- OriginSU configs effectives ---"
+          grep -E '^CONFIG_(KSU|KPM)' out/.config || true
+          make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
 
       - name: Package with AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 -b master anykernel
-          rm -rf anykernel/.git
-          
-          OUT_DIR=$(pwd)/kernel_source/out
-          if [ -d "$OUT_DIR" ]; then
-            find "$OUT_DIR" -name "Image.gz-dtb" -exec cp {} anykernel/ \; || true
-            find "$OUT_DIR" -name "Image.gz" -exec cp {} anykernel/ \; || true
-            find "$OUT_DIR" -name "Image" -exec cp {} anykernel/ \; || true
-          else
-            cp kernel_source/out/*/arch/arm64/boot/Image* anykernel/ 2>/dev/null || true
-          fi
-          
-          cd anykernel
-          zip -r9 ../MSM8937-OriginSU-Kernel.zip *
+          git clone --depth=1 https://github.com/riarumoda/AnyKernel3 AnyKernel3
+          rm -rf AnyKernel3/.git
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
+          sed -i 's/supported.versions=11-16/supported.versions=11-17/' AnyKernel3/anykernel.sh
+          sed -i 's/sweet (sm6150)/ mi89x7 (MSM8937) OriginSU/g' AnyKernel3/banner
+          sed -i 's/device.name1=sweet/device.name1=mi8937/' AnyKernel3/anykernel.sh
+          sed -i 's/device.name2=sweetin/device.name2=mi8917/' AnyKernel3/anykernel.sh
+          sed -i '/device.name2=mi8917/a device.name3=santoni\ndevice.name4=prada\ndevice.name5=rolex\ndevice.name6=ugglite\ndevice.name7=riva\ndevice.name8=ugg\ndevice.name9=land' AnyKernel3/anykernel.sh
+          cd AnyKernel3
+          zip -rq9 "../MSM8937-OriginSU-$(date +%Y%m%d).zip" ./*
 
-      - name: Upload Kernel Artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MSM8937-OriginSU-Kernel
-          path: MSM8937-OriginSU-Kernel.zip
+          path: |
+            *.zip
+            ${{ env.KERNEL_DIR }}/build.log
+            ${{ env.KERNEL_DIR }}/out/.config
