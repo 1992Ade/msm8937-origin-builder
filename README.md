@@ -1,7 +1,7 @@
 # MSM8937 Kernel Builder with OriginSU
 
 [![Build](https://img.shields.io/badge/build-GitHub%20Actions-blue?logo=github-actions&logoColor=white)](../../actions/workflows/build-kernel.yml)
-[![Latest release](https://img.shields.io/github/v/release/OWNER/REPO?label=latest&logo=github)](../../releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/1992Ade/msm8937-origin-builder?label=latest&logo=github)](../../releases/latest)
 
 > **Your warranty is now void.** Flashing a custom kernel can brick your device. You are responsible for what you flash. Always keep a backup of your stock `boot` partition.
 
@@ -11,7 +11,7 @@ This repository automates the compilation of a custom **Linux 4.19** kernel for 
 
 Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution and is packaged as a recovery-flashable `.zip` (TWRP / OrangeFox) with AnyKernel3.
 
-**Fully automated:** a GitHub Actions workflow checks every day for a new OriginSU release. When one appears, the kernel is rebuilt and a new GitHub Release is published automatically — no manual action needed.
+**Fully automated:** a GitHub Actions workflow checks every week (Sunday) for a new OriginSU release. When one appears, the kernel is rebuilt and a new GitHub Release is published automatically — no manual action needed.
 
 ---
 
@@ -48,6 +48,7 @@ The full kernel `.config` of each variant is attached to the release for referen
 
 ## 🔧 Installation
 
+0. **Coming from Magisk, APatch, BakaSU or another KernelSU?** Read [this warning](#️-coming-from-another-root-solution) first.
 1. Back up your stock `boot` partition (from TWRP/OrangeFox, or keep the `boot.img` of your ROM).
 2. Download the zip from the [latest release](../../releases/latest).
 3. Reboot to recovery and flash it (or `adb sideload <file>.zip`).
@@ -89,7 +90,7 @@ check  ──►  build (susfs)  ──┐
 
 | Trigger | Behaviour |
 |---|---|
-| Daily at 05:17 UTC | Builds **only** if a new OriginSU release is out |
+| Every Sunday at 05:17 UTC | Builds **only** if a new OriginSU release is out |
 | Manual (`Run workflow`) | Always builds; you can pick an OriginSU tag, toggle KPM and choose whether to publish a release |
 
 A manual run for a version that is already released **replaces** that release (useful to pick up kernel updates).
@@ -122,8 +123,43 @@ A manual run for a version that is already released **replaces** that release (u
 | Build fails in *Integrate OriginSU* | A hook patch no longer matches OriginSU — check `build-<mode>.log` in the run artifacts |
 | Build fails with KPM errors | Re-run manually with `kpm` disabled |
 | Device stuck on boot logo | Flash the `-manual` variant, or restore the stock `boot.img` |
-| Wi-Fi not working | Make sure your ROM is built for the Mi-Thorium 4.19 kernel |
+| Boots, but no Wi-Fi / mobile network / camera | Almost always a module conflict — see [Coming from another root solution?](#️-coming-from-another-root-solution) below |
+| Wi-Fi not working (no modules installed) | Make sure your ROM is built for the Mi-Thorium 4.19 kernel |
 | No new release after an OriginSU update | Check that the scheduled workflow is still enabled (60-day rule above) |
+
+### ⚠️ Coming from another root solution?
+
+If you previously used **Magisk, APatch, BakaSU (perf_neon), KernelSU or SukiSU**, your old modules are still in `/data/adb/modules` and will be loaded by OriginSU.
+
+OriginSU ships its **own Zygisk (OriginZygisk)**. Old modules — especially another Zygisk implementation (ReZygisk, NeoZygisk, Zygisk Next) or Zygisk-based modules such as LSPosed — can conflict with it. The typical symptom is a phone that **boots fine but has no Wi-Fi, no mobile network and/or no camera**.
+
+**Fix: uninstall all modules, then reinstall them one by one.**
+
+From a PC (use the interactive shell — it also works in Windows PowerShell):
+
+```sh
+adb shell
+su
+for m in /data/adb/modules/*/; do touch "$m/remove"; done
+rm -rf /data/adb/modules_update/*
+reboot
+```
+
+Each module's `uninstall.sh` runs on the next boot. If some folders remain afterwards:
+
+```sh
+adb shell
+su
+rm -rf /data/adb/modules/*
+reboot
+```
+
+Then:
+
+- Reinstall your modules **one at a time**, checking Wi-Fi, network and camera after each reboot.
+- Use **only one Zygisk**: keep OriginZygisk and don't install another Zygisk module.
+- Reinstall Zygisk-based modules (e.g. LSPosed) last.
+- Optional cleanup of leftovers from other root solutions, e.g. APatch: `rm -rf /data/adb/ap /data/adb/apd`.
 
 ---
 
