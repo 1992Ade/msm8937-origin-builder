@@ -16,7 +16,7 @@ on:
       kpm:
         description: "Activer CONFIG_KPM"
         type: boolean
-        default: true
+        default: false
       publish:
         description: "Publier une release GitHub"
         type: boolean
