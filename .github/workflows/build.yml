@@ -1,24 +1,24 @@
 name: Build MSM8937 Kernel (Mi-Thorium) with OriginSU
 
-# Adapté de riarumoda/perf_neon-builder (.github/workflows/mithorium-msm8937.yml)
-# BakaSU remplacé par OriginSU, même méthode de hooks (JackA1ltman NonGKI patches).
+# Adapted from riarumoda/perf_neon-builder (.github/workflows/mithorium-msm8937.yml)
+# BakaSU replaced by OriginSU, same hook method (JackA1ltman NonGKI patches).
 
 on:
-  # Vérifie chaque dimanche (05:17 UTC) si une nouvelle release OriginSU est sortie
+  # Checks every Sunday (05:17 UTC) whether a new OriginSU release is out
   schedule:
     - cron: "17 5 * * 0"
   workflow_dispatch:
     inputs:
       originsu_ref:
-        description: "Tag OriginSU à compiler (vide = dernière release)"
+        description: "OriginSU tag to build (empty = latest release)"
         required: false
         default: ""
       kpm:
-        description: "Activer CONFIG_KPM"
+        description: "Enable CONFIG_KPM"
         type: boolean
         default: false
       publish:
-        description: "Publier une release GitHub"
+        description: "Publish a GitHub Release"
         type: boolean
         default: true
 
@@ -29,7 +29,7 @@ concurrency:
 permissions:
   contents: read
 
-# bash -eo pipefail : une erreur de make dans "make | tee" fait échouer l'étape
+# bash -eo pipefail: a make error in "make | tee" fails the step
 defaults:
   run:
     shell: bash
@@ -44,7 +44,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # 1) Faut-il compiler ? (nouvelle version OriginSU non encore publiée)
+  # 1) Do we need to build? (new OriginSU version not released yet)
   # ------------------------------------------------------------------
   check:
     runs-on: ubuntu-latest
@@ -62,31 +62,31 @@ jobs:
             TAG=$(gh release view --repo samakshkambxj/OriginSU --json tagName -q .tagName 2>/dev/null || true)
           fi
           if [ -z "$TAG" ]; then
-            # Pas de release publiée : on se rabat sur le tag le plus récent
+            # No published release: fall back to the most recent tag
             TAG=$(gh api repos/samakshkambxj/OriginSU/tags -q '.[0].name')
           fi
-          [ -n "$TAG" ] || { echo "::error::Impossible de déterminer la version OriginSU"; exit 1; }
-          echo "OriginSU version : $TAG"
+          [ -n "$TAG" ] || { echo "::error::Could not determine the OriginSU version"; exit 1; }
+          echo "OriginSU version: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Lancement manuel -> build forcé"
+            echo "Manual run -> forced build"
             echo "build=true" >> "$GITHUB_OUTPUT"
           elif gh release view "originsu-$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release originsu-$TAG déjà publiée -> rien à faire"
+            echo "Release originsu-$TAG already published -> nothing to do"
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Nouvelle version détectée -> build"
+            echo "New version detected -> build"
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
   # ------------------------------------------------------------------
-  # 2) Compilation (SUSFS inline hook + manual hook)
+  # 2) Build (SUSFS inline hook + manual hook)
   # ------------------------------------------------------------------
   build:
     needs: check
     if: needs.check.outputs.build == 'true'
-    runs-on: ubuntu-latest   # Neutron Clang a besoin d'une glibc récente (24.04)
+    runs-on: ubuntu-latest   # Neutron Clang needs a recent glibc (24.04)
     strategy:
       fail-fast: false
       matrix:
@@ -94,8 +94,9 @@ jobs:
     env:
       ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
       HOOK_MODE: ${{ matrix.hook_mode }}
-      # Planifié : inputs vides -> KPM activé par défaut
-      KPM: ${{ github.event_name == 'schedule' && 'true' || inputs.kpm }}
+      # KPM is off by default: only enabled when ticked on a manual run
+      # (scheduled runs have no inputs -> 'false')
+      KPM: ${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'false' }}
 
     steps:
       - name: Install build dependencies
@@ -104,7 +105,7 @@ jobs:
           sudo apt-get install -y bc build-essential bison flex zip p7zip-full curl git wget \
             libssl-dev zstd lld python3 patchutils ccache libc6-dev unzip
 
-      - name: Clone kernel + extra repositories (comme perf_neon)
+      - name: Clone kernel + extra repositories (as in perf_neon)
         run: |
           git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
@@ -115,7 +116,7 @@ jobs:
           # Device trees
           clone https://github.com/Mi-Thorium/kernel_devicetree_msm-4.19.git      dts/master                       arch/arm64/boot/dts/vendor-legacy
           clone https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-msm8937.git dts/mi8937/4.19/master          arch/arm64/boot/dts/xiaomi-msm8937
-          # SDM439 : requis car référencé par les Kconfig/Makefile du tree
+          # SDM439: required because it is referenced by the tree's Kconfig/Makefile
           clone https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-sdm439.git  dts/mi439/4.19/master           arch/arm64/boot/dts/xiaomi-sdm439
           # Techpacks
           clone https://github.com/Mi-Thorium/kernel_techpack_xiaomi-msm8937.git   techpack/mi8937/4.19/master      techpack/xiaomi-msm8937
@@ -123,7 +124,7 @@ jobs:
           clone https://github.com/Mi-Thorium/kernel_techpack_audio-legacy.git     audio/4.19/mithorium/master      techpack/audio-legacy
           clone https://github.com/Mi-Thorium/kernel_techpack_camera-legacy.git    camera/LA.UM.8.6.r1-05300-89xx.0/4.19/mithorium techpack/camera-legacy
           clone https://github.com/Mi-Thorium/kernel_techpack_camera-legacy.git    camera/LA.UM.5.3-10610-89xx.0/4.19/mithorium   techpack/camera-legacy-m
-          # >>> C'est ça qui corrige l'erreur drivers/staging/prima/Kconfig <<<
+          # >>> This is what fixes the drivers/staging/prima/Kconfig error <<<
           clone https://github.com/Mi-Thorium/vendor_qcom_opensource_wlan_prima.git wlan/LA.UM.9.6.4/mithorium/master drivers/staging/prima
 
       - name: Download Neutron Clang
@@ -131,7 +132,7 @@ jobs:
           TC_URL="$(curl -fsSL --retry 5 --retry-all-errors -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest \
             | grep -o '"browser_download_url": *"[^"]*"' | head -n1 | cut -d '"' -f4)"
-          [ -n "$TC_URL" ] || { echo "Toolchain URL introuvable"; exit 1; }
+          [ -n "$TC_URL" ] || { echo "Toolchain URL not found"; exit 1; }
           mkdir -p "$KERNEL_DIR/clang"
           curl -fL --retry 5 --retry-all-errors -o /tmp/clang.tar.zst "$TC_URL"
           tar --zstd -C "$KERNEL_DIR/clang" -xf /tmp/clang.tar.zst
@@ -151,7 +152,7 @@ jobs:
             if [ -f "arch/arm64/configs/$f" ]; then
               echo "-> merge $f"; cat "arch/arm64/configs/$f" >> out/.config
             else
-              echo "::warning::fragment absent : $f"
+              echo "::warning::missing fragment: $f"
             fi
           done
           { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
@@ -164,12 +165,12 @@ jobs:
           echo "COMPILE_DEFCONFIG=${DEVICE}_defconfig" >> "$GITHUB_ENV"
           sed -i "s|\$(KCONFIG_CONFIG)|arch/arm64/configs/${DEVICE}_stock_defconfig|g" kernel/Makefile
 
-      - name: Device patches (comme perf_neon)
+      - name: Device patches (as in perf_neon)
         working-directory: ${{ env.KERNEL_DIR }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Annule le KernelSU déjà intégré dans le tree Mi-Thorium (sinon conflit avec OriginSU)
+          # Revert the KernelSU already integrated in the Mi-Thorium tree (otherwise it conflicts with OriginSU)
           curl -sL --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.patch" \
             https://api.github.com/repos/Mi-Thorium/kernel_msm-4.19/commits/624875e8edc36ae280b1f8efc1d3c48a28da64ea \
@@ -193,30 +194,30 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
 
-          # Warnings bloquants avec Clang récent
+          # Warnings that break the build with recent Clang
           sed -i 's/-Wno-format-security/-Wno-format-security -Wno-declaration-after-statement -Wno-implicit-int -Wno-enum-conversion -Wno-default-const-init-var-unsafe -Wno-default-const-init-field-unsafe -Wno-misleading-indentation -Wno-unsequenced -Wno-sizeof-pointer-memaccess -Wno-implicit-function-declaration -Wno-implicit-enum-enum-cast/g' Makefile
           sed -i '/export KBUILD_CFLAGS/i KBUILD_CFLAGS += -mllvm -polly -mllvm -enable-gvn-hoist -Wno-unused-command-line-argument' Makefile
 
-      - name: Integrate OriginSU (à la place de BakaSU)
+      - name: Integrate OriginSU (instead of BakaSU)
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           NONGKI=https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches
 
-          # 1) Setup OriginSU (clone dans ./KernelSU + lien drivers/kernelsu)
+          # 1) Set up OriginSU (clone into ./KernelSU + drivers/kernelsu symlink)
           curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
             | bash -s "$ORIGINSU_TAG"
 
-          # 1b) Correctif OriginSU non-GKI : ksud_integration.c appelle ksu_preinit_release()
-          #     mais n'inclut preinit.h qu'en mode Tracepoint/Tamper (GKI). En SuSFS/Manual,
-          #     le stub inline (KSU_NO_PREINIT) n'est pas vu -> "undefined symbol" au link.
+          # 1b) OriginSU non-GKI fix: ksud_integration.c calls ksu_preinit_release()
+          #     but only includes preinit.h in Tracepoint/Tamper mode (GKI). In SuSFS/Manual
+          #     mode the inline stub (KSU_NO_PREINIT) is not seen -> "undefined symbol" at link time.
           F=KernelSU/kernel/runtime/ksud_integration.c
           if [ -f "$F" ] && grep -q 'ksu_preinit_release' "$F" && \
              ! sed -n '1,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/p' "$F" | grep -q '^#include "preinit/preinit.h"'; then
             sed -i '0,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/s//#include "preinit\/preinit.h" \/\/ fix non-GKI link\n&/' "$F"
-            echo "-> preinit.h inclus sans condition dans $F"
+            echo "-> preinit.h included unconditionally in $F"
           fi
 
-          # 2) Configs communes (mêmes symboles que BakaSU)
+          # 2) Common configs (same symbols as BakaSU)
           cat >> "$FINAL_DEFCONFIG" <<'EOF'
           CONFIG_KSU=y
           CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
@@ -228,7 +229,7 @@ jobs:
           fi
 
           if [ "$HOOK_MODE" = "susfs" ]; then
-            # 3a) SUSFS : patch noyau + hooks inline SUSFS
+            # 3a) SUSFS: kernel patch + SUSFS inline hooks
             curl -LSs --fail --retry 3 "$NONGKI/Patch/susfs_patch_to_${KERNEL_VERSION}.patch" | patch -p1 -s --fuzz=5 || true
             cat >> "$FINAL_DEFCONFIG" <<'EOF'
           CONFIG_KSU_SUSFS=y
@@ -242,7 +243,7 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
-            # Correctif 4.19 de perf_neon (fs/namespace.c)
+            # 4.19 fix from perf_neon (fs/namespace.c)
             sed -i 's|^[[:space:]]*mnt = alloc_vfsmnt(fc->source ?: "none");|#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(fc->source ?: "none");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif|' fs/namespace.c
             HOOK_SCRIPT="$NONGKI/susfs_inline_hook_patches.sh"
           else
@@ -252,13 +253,13 @@ jobs:
           fi
           sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
 
-          # 4) Hooks dans les sources du noyau
+          # 4) Hooks in the kernel sources
           curl -LSs --fail --retry 3 "$HOOK_SCRIPT" | bash
 
-          # 5) Correctif 4.19 de perf_neon (fs/stat.c)
+          # 5) 4.19 fix from perf_neon (fs/stat.c)
           sed -i 's/ksu_handle_stat(&dfd, &fname, &flag);/ksu_handle_stat(\&dfd, \&fname, \&flags);/g' fs/stat.c
 
-          # 6) Exporter les symboles SELinux statiques
+          # 6) Export static SELinux symbols
           unstatic() { [ -f "$1" ] && grep -q "static $2" "$1" && sed -i "s/static $2/$2/" "$1" && echo "  exported: $2" || true; }
           unstatic security/selinux/selinuxfs.c   'ssize_t (\*write_op\[\])'
           unstatic security/selinux/selinuxfs.c   'ssize_t (\*const write_op\[\])'
@@ -278,28 +279,28 @@ jobs:
           mkdir -p out
           make O=out $MAKE_ARGS "$COMPILE_DEFCONFIG"
           { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
-          echo "--- OriginSU configs effectives ---"
+          echo "--- Effective OriginSU configs ---"
           grep -E '^CONFIG_(KSU|KPM)' out/.config || true
           set +e
           make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
           RC=${PIPESTATUS[0]}
           set -e
 
-          echo "--- Contenu de out/arch/arm64/boot ---"
-          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(dossier absent)"
+          echo "--- Contents of out/arch/arm64/boot ---"
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(directory missing)"
 
           if [ "$RC" -ne 0 ]; then
-            echo "::error::La compilation a échoué (make code $RC). Premières erreurs :"
+            echo "::error::Build failed (make exit code $RC). First errors:"
             grep -nE "error:|Error [0-9]|undefined reference|\*\*\*" build.log | head -n 40 || true
             exit "$RC"
           fi
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "::error::Compilation OK mais pas d'Image.gz-dtb."
+            echo "::error::Build succeeded but no Image.gz-dtb was produced."
             grep -E "APPENDED_DTB|CONFIG_BUILD_ARM64_DT_OVERLAY|CONFIG_ARCH_MSM8937" out/.config || true
             exit 1
           fi
 
-      - name: Upload build log (même en cas d'échec)
+      - name: Upload build log (even on failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -337,11 +338,11 @@ jobs:
           path: dist/*
 
   # ------------------------------------------------------------------
-  # 3) Publication de la release GitHub
+  # 3) Publish the GitHub Release
   # ------------------------------------------------------------------
   release:
     needs: [check, build]
-    # Publie même si une seule des deux variantes a compilé
+    # Publishes even if only one of the two variants built
     if: >-
       !cancelled() && needs.check.outputs.build == 'true' &&
       (github.event_name == 'schedule' || inputs.publish)
