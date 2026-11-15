@@ -9,9 +9,26 @@
 
 This repository automates the compilation of a custom **Linux 4.19** kernel for **MSM8937** (Snapdragon 430/435) Xiaomi devices, based on the [Mi-Thorium](https://github.com/Mi-Thorium) kernel tree. Check out **[riarumoda](https://github.com/riarumoda/perf_neon-builder)** for the original work with BakaSU implementation, other devices and Custom ROM suggestions.
 
-Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution and is packaged as a recovery-flashable `.zip` (TWRP / OrangeFox) with AnyKernel3.
+Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution — together with **SuSFS**, **Baseband Guard**, **NoMount** and **Droidspaces** (see [Included features](#-included-features)) — and is packaged as a recovery-flashable `.zip` (TWRP / OrangeFox) with AnyKernel3.
 
 **Fully automated:** a GitHub Actions workflow checks every week (Sunday) for a new OriginSU release. When one appears, the kernel is rebuilt and a new GitHub Release is published automatically — no manual action needed.
+
+---
+
+## 🧩 Included Features
+
+On top of OriginSU, every build enables the same hardening/usability modules as the base [perf_neon-builder](https://github.com/riarumoda/perf_neon-builder) for the `mi89x7` target:
+
+| Feature | Upstream | What it does | Kernel config |
+|---|---|---|---|
+| **SuSFS** | [simonpunk](https://gitlab.com/simonpunk/susfs4ksu) | Hides root/mounts from detection (`-susfs` variant only) | `CONFIG_KSU_SUSFS_*` |
+| **Baseband Guard** | [vc-teahouse](https://github.com/vc-teahouse/Baseband-guard) | LSM that blocks writes to the modem/baseband partitions | `CONFIG_BBG=y` |
+| **NoMount** | [maxsteeel](https://github.com/maxsteeel/nomount) | Prevents unwanted mounts used for root detection | `CONFIG_NOMOUNT=y` |
+| **Droidspaces** | [ravindu644](https://github.com/ravindu644/Droidspaces-OSS) | Namespace/cgroup isolation to run isolated Android/Linux spaces | `CONFIG_NAMESPACES`, `CONFIG_*_NS`, cgroups, netfilter… |
+
+> **Droidspaces note:** it enables `CONFIG_CFS_BANDWIDTH=y`, which can conflict with Qualcomm's WALT scheduler on some trees. It is enabled for `mi89x7` the same way the base project does; if a build or boot ever breaks, this is the first config to suspect.
+>
+> If you use Droidspaces with a systemd-based Linux space, mask the `NetworkManager` and `wpa_supplicant` services inside that space (as noted upstream).
 
 ---
 
@@ -83,6 +100,7 @@ check  ──►  build (susfs)  ──┐
    - Generates the config from `vendor/msm8937-perf_defconfig` + the Mi-Thorium fragments (`msm8937-legacy`, `xiaomi/msm8937/mi8937`, `kprobes`, …).
    - Reverts the KernelSU commit already present in the Mi-Thorium tree, then integrates OriginSU at the exact release tag.
    - Applies the non-GKI hook patches (SuSFS inline hook or manual hook) and the 4.19 fixups from perf_neon-builder.
+   - Enables the extra features — **Baseband Guard**, **NoMount** and **Droidspaces** (see [Included features](#-included-features)).
    - Compiles `Image.gz-dtb` and packages it with AnyKernel3.
 3. **release** — publishes a GitHub Release `originsu-<tag>` with both zips, the configs and release notes (OriginSU version, kernel commit, kernel version, build date).
 
@@ -173,6 +191,9 @@ This project relies on the incredible work of the following open-source projects
 * **[osm0sis](https://github.com/osm0sis/AnyKernel3)** — For the original AnyKernel3.
 * **[JackA1ltman](https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd)** — For the non-GKI KernelSU hook scripts and SuSFS patches.
 * **[simonpunk](https://gitlab.com/simonpunk/susfs4ksu)** — For SuSFS.
+* **[vc-teahouse](https://github.com/vc-teahouse/Baseband-guard)** — For Baseband Guard.
+* **[maxsteeel](https://github.com/maxsteeel/nomount)** — For NoMount.
+* **[ravindu644](https://github.com/ravindu644/Droidspaces-OSS)** — For Droidspaces.
 * **[Neutron Toolchains](https://github.com/Neutron-Toolchains)** — For the Clang toolchain.
 * **[tiann/KernelSU](https://github.com/tiann/KernelSU)** — The project OriginSU is built upon.
 
