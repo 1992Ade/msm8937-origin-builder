@@ -1,18 +1,58 @@
-name: Build MSM8937 Kernel (Mi-Thorium) with OriginSU
+name: Build Exynos 9820 Kernels (FreeRunner base) with OriginSU
 
-# Adapted from riarumoda/perf_neon-builder (.github/workflows/mithorium-msm8937.yml)
-# BakaSU replaced by OriginSU, same hook method (JackA1ltman NonGKI patches).
+# Kernel: the REAL FreeRunnerKernel source, Project-Matrixx-New/android_kernel_samsung_exynos9820
+# (named in LeDrew2017/FreeRunnerKernel's release notes). Linux 4.14, Galaxy S10 / Note10 / F62.
+# Branch lineage-24.0 = FreeRunner v3.9 (Nov 2026: clone3 / CAP_CHECKPOINT_RESTORE backports; the
+# defconfig still says v3.8-R2 until the dev pushes the bump). It ships KernelSU-Next (git
+# submodule) + SuSFS v2.3.0 already integrated in fs/.
+#
+# NOTE: LeDrew2017/android_kernel_samsung_exynos9820 (used before) is a Dec-2024 mirror of
+# hiratazx's Yuki v3.0 tree, NOT FreeRunner. ProjectMatrixx-exynos9820 is the old org (stops at v3.7).
+#
+# Build is done the way FreeRunner builds it: `make LLVM=1` with clang 21 (official LLVM 21.1.8
+# release), no GNU binutils, no CROSS_COMPILE, config fragments merged with merge_config.sh.
+#
+# root=ksunext builds FreeRunner as-is (control build: it MUST boot, otherwise the problem is the
+# toolchain / packaging, not OriginSU). root=originsu replaces KSU-Next by OriginSU and adapts the
+# tree's KSU-Next hooks with scripts/originsu_hooks_4.14.sh (see that file for why).
 
 on:
-  # Checks every Sunday (05:17 UTC) whether a new OriginSU release is out
   schedule:
-    - cron: "17 5 * * 0"
+    - cron: "43 4 * * 0"   # Sunday 04:43 UTC
   workflow_dispatch:
     inputs:
       originsu_ref:
         description: "OriginSU tag to build (empty = latest release)"
         required: false
         default: ""
+      kernel_branch:
+        description: "FreeRunner kernel branch (Project-Matrixx-New/android_kernel_samsung_exynos9820)"
+        required: false
+        default: "lineage-24.0"
+      device:
+        description: "Device to build (all = every device)"
+        type: choice
+        options: [all, beyond0lte, beyond1lte, beyond2lte, beyondx, d1, d1x, d2s, d2x, f62]
+        default: all
+      root:
+        description: "originsu = OriginSU; ksunext = FreeRunner as-is (control build to validate the CI)"
+        type: choice
+        options: [originsu, ksunext]
+        default: originsu
+      hook_mode:
+        description: "susfs = root + SuSFS (in-tree v2.1.0); manual = root only, SuSFS disabled"
+        type: choice
+        options: [susfs, manual]
+        default: susfs
+      susfs_version:
+        description: "SuSFS (susfs mode only): v2.4.0 = upgraded (JackA1ltman 4.14 port), intree = FreeRunner's v2.3.0"
+        type: choice
+        options: [v2.4.0, intree]
+        default: v2.4.0
+      extra_features:
+        description: "Add Baseband Guard + NoMount + Droidspaces"
+        type: boolean
+        default: false
       kpm:
         description: "Enable CONFIG_KPM"
         type: boolean
@@ -20,7 +60,7 @@ on:
       publish:
         description: "Publish a GitHub Release"
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: kernel-build
@@ -29,421 +69,217 @@ concurrency:
 permissions:
   contents: read
 
-# bash -eo pipefail: a make error in "make | tee" fails the step
 defaults:
   run:
     shell: bash
 
 env:
-  KERNEL_DIR: android_kernel_xiaomi_msm8937
-  KERNEL_VERSION: "4.19"
-  DEVICE: mi89x7
+  KERNEL_REPO: Project-Matrixx-New/android_kernel_samsung_exynos9820
+  KERNEL_DIR: kernel
+  AK3_REPO: https://github.com/LeDrew2017/Anykernel
+  LLVM_VERSION: "21.1.8"
   KBUILD_BUILD_USER: builder
   KBUILD_BUILD_HOST: github-actions
-  MAKE_ARGS: ARCH=arm64 LLVM=1 LLVM_IAS=1 LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 jobs:
   # ------------------------------------------------------------------
-  # 1) Do we need to build? (new OriginSU version not released yet)
+  # 1) Do we need to build? (new OriginSU version, with its manager APK)
   # ------------------------------------------------------------------
   check:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       build: ${{ steps.ver.outputs.build }}
+      branch: ${{ steps.ver.outputs.branch }}
+      devices: ${{ steps.ver.outputs.devices }}
     steps:
       - name: Compare OriginSU latest release with our releases
         id: ver
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ inputs.originsu_ref }}"
-          if [ -z "$TAG" ]; then
-            TAG=$(gh release view --repo samakshkambxj/OriginSU --json tagName -q .tagName 2>/dev/null || true)
-          fi
-          if [ -z "$TAG" ]; then
-            # No published release: fall back to the most recent tag
-            TAG=$(gh api repos/samakshkambxj/OriginSU/tags -q '.[0].name')
-          fi
-          [ -n "$TAG" ] || { echo "::error::Could not determine the OriginSU version"; exit 1; }
-          echo "OriginSU version: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          BRANCH="${{ inputs.kernel_branch }}"; BRANCH="${BRANCH:-lineage-24.0}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual run -> forced build"
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          elif gh release view "originsu-$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release originsu-$TAG already published -> nothing to do"
-            echo "build=false" >> "$GITHUB_OUTPUT"
+          DEV="${{ inputs.device }}"
+          if [ -z "$DEV" ] || [ "$DEV" = "all" ]; then
+            echo 'devices=["beyond0lte","beyond1lte","beyond2lte","beyondx","d1","d1x","d2s","d2x","f62"]' >> "$GITHUB_OUTPUT"
           else
-            echo "New version detected -> build"
-            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "devices=[\"$DEV\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+          TAG="${{ inputs.originsu_ref }}"
+          [ -n "$TAG" ] || TAG=$(gh release view --repo samakshkambxj/OriginSU --json tagName -q .tagName 2>/dev/null || true)
+          [ -n "$TAG" ] || { echo "::error::Could not determine the OriginSU version"; exit 1; }
+          echo "OriginSU version: $TAG"; echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          APKS=$(gh release view "$TAG" --repo samakshkambxj/OriginSU --json assets -q '.assets[].name' 2>/dev/null | grep -E '\.apk$' || true)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run -> forced build"; echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$APKS" ]; then
+            echo "::warning::OriginSU release $TAG has no manager APK yet -> no build"; echo "build=false" >> "$GITHUB_OUTPUT"
+          elif gh release view "originsu-$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release originsu-$TAG already published -> nothing to do"; echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version detected -> build"; echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
   # ------------------------------------------------------------------
-  # 2) Build (SUSFS inline hook + manual hook)
+  # 2) Build (one job per device)
   # ------------------------------------------------------------------
   build:
     needs: check
     if: needs.check.outputs.build == 'true'
-    runs-on: ubuntu-latest   # Neutron Clang needs a recent glibc (24.04)
+    # Pinned: the official LLVM release binaries link against libxml2.so.2 (Ubuntu 24.04),
+    # newer runner images ship a libxml2 with another soname -> ld.lld fails to start.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        hook_mode: [susfs, manual]
+        # beyond0lte=S10e, beyond1lte=S10, beyond2lte=S10+, beyondx=S10 5G,
+        # d1=Note10, d1x=Note10 5G, d2s=Note10+, d2x=Note10+ 5G, f62=Galaxy F62.
+        device: ${{ fromJSON(needs.check.outputs.devices) }}
     env:
+      DEVICE: ${{ matrix.device }}
       ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
-      HOOK_MODE: ${{ matrix.hook_mode }}
-      # KPM is off by default: only enabled when ticked on a manual run
-      # (scheduled runs have no inputs -> 'false')
+      KERNEL_BRANCH: ${{ needs.check.outputs.branch }}
+      ROOT: ${{ github.event_name == 'workflow_dispatch' && inputs.root || 'originsu' }}
+      HOOK_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.hook_mode || 'susfs' }}
+      SUSFS_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.susfs_version || 'v2.4.0' }}
+      EXTRA_FEATURES: ${{ github.event_name == 'workflow_dispatch' && inputs.extra_features || 'false' }}
       KPM: ${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'false' }}
 
     steps:
+      - name: Checkout builder scripts
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential bison flex zip p7zip-full curl git wget \
-            libssl-dev zstd lld python3 patchutils ccache libc6-dev unzip
+          sudo apt-get install -y bc bison flex zip curl git libssl-dev libelf-dev zstd xz-utils \
+            python3 python-is-python3 cpio unzip libxml2
 
-      - name: Clone kernel + extra repositories (as in perf_neon)
+      - name: Clone FreeRunner kernel (with its submodules)
         run: |
-          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git clone --depth=1 -b "$KERNEL_BRANCH" --recurse-submodules --shallow-submodules \
+            "https://github.com/${KERNEL_REPO}.git" "$KERNEL_DIR"
+          echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          D="$KERNEL_DIR/arch/arm64/configs/exynos9820-${DEVICE}_defconfig"
+          [ -f "$D" ] || { echo "::error::$D missing on $KERNEL_BRANCH"; exit 1; }
+          echo "-- $(grep -m1 CONFIG_LOCALVERSION= "$D")"
+          echo "-- SuSFS in tree: $(grep -m1 '#define SUSFS_VERSION' "$KERNEL_DIR/include/linux/susfs.h" 2>/dev/null || echo none)"
 
-          git clone --depth=1 -b mithorium/a13/master https://github.com/Mi-Thorium/kernel_msm-4.19.git "$KERNEL_DIR"
-          cd "$KERNEL_DIR"
-
-          clone() { echo "-> $3"; git clone --depth=1 -b "$2" "$1" "$3"; }
-          # Device trees
-          clone https://github.com/Mi-Thorium/kernel_devicetree_msm-4.19.git      dts/master                       arch/arm64/boot/dts/vendor-legacy
-          clone https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-msm8937.git dts/mi8937/4.19/master          arch/arm64/boot/dts/xiaomi-msm8937
-          # SDM439: required because it is referenced by the tree's Kconfig/Makefile
-          clone https://github.com/Mi-Thorium/kernel_devicetree_xiaomi-sdm439.git  dts/mi439/4.19/master           arch/arm64/boot/dts/xiaomi-sdm439
-          # Techpacks
-          clone https://github.com/Mi-Thorium/kernel_techpack_xiaomi-msm8937.git   techpack/mi8937/4.19/master      techpack/xiaomi-msm8937
-          clone https://github.com/Mi-Thorium/kernel_techpack_xiaomi-sdm439.git    techpack/mi439/4.19/master       techpack/xiaomi-sdm439
-          clone https://github.com/Mi-Thorium/kernel_techpack_audio-legacy.git     audio/4.19/mithorium/master      techpack/audio-legacy
-          clone https://github.com/Mi-Thorium/kernel_techpack_camera-legacy.git    camera/LA.UM.8.6.r1-05300-89xx.0/4.19/mithorium techpack/camera-legacy
-          clone https://github.com/Mi-Thorium/kernel_techpack_camera-legacy.git    camera/LA.UM.5.3-10610-89xx.0/4.19/mithorium   techpack/camera-legacy-m
-          # >>> This is what fixes the drivers/staging/prima/Kconfig error <<<
-          clone https://github.com/Mi-Thorium/vendor_qcom_opensource_wlan_prima.git wlan/LA.UM.9.6.4/mithorium/master drivers/staging/prima
-
-      - name: Download Neutron Clang
+      - name: Download LLVM ${{ env.LLVM_VERSION }} (same major as FreeRunner's clang-21)
         run: |
-          TC_URL="$(curl -fsSL --retry 5 --retry-all-errors -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest \
-            | grep -o '"browser_download_url": *"[^"]*"' | head -n1 | cut -d '"' -f4)"
-          [ -n "$TC_URL" ] || { echo "Toolchain URL not found"; exit 1; }
-          mkdir -p "$KERNEL_DIR/clang"
-          curl -fL --retry 5 --retry-all-errors -o /tmp/clang.tar.zst "$TC_URL"
-          tar --zstd -C "$KERNEL_DIR/clang" -xf /tmp/clang.tar.zst
-          rm -f /tmp/clang.tar.zst
-          echo "$PWD/$KERNEL_DIR/clang/bin" >> "$GITHUB_PATH"
-
-      - name: Generate kernel config
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          MAIN_DEFCONFIG="vendor/msm8937-perf_defconfig"
-          COMMON_FRAGS="vendor/msm8937-legacy.config vendor/common.config vendor/msm-clk.config"
-          DEVICE_FRAGS="vendor/xiaomi/msm8937/common.config vendor/xiaomi/msm8937/mi8937.config"
-          FEATURE_FRAGS="vendor/feature/android-12.config vendor/feature/compat-vdso.config vendor/feature/erofs.config vendor/feature/exfat.config vendor/feature/kprobes.config vendor/feature/lmkd.config vendor/feature/ntfs.config vendor/feature/wireguard.config"
-
-          make O=out $MAKE_ARGS "$MAIN_DEFCONFIG"
-          for f in $COMMON_FRAGS $DEVICE_FRAGS $FEATURE_FRAGS; do
-            if [ -f "arch/arm64/configs/$f" ]; then
-              echo "-> merge $f"; cat "arch/arm64/configs/$f" >> out/.config
-            else
-              echo "::warning::missing fragment: $f"
-            fi
+          F="LLVM-${LLVM_VERSION}-Linux-X64"
+          curl -fL --retry 5 --retry-all-errors -o /tmp/llvm.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${F}.tar.xz"
+          mkdir -p "$HOME/llvm" && tar -C "$HOME/llvm" --strip-components=1 -xf /tmp/llvm.tar.xz && rm -f /tmp/llvm.tar.xz
+          echo "$HOME/llvm/bin" >> "$GITHUB_PATH"
+          # Fail here (not 10 min into the build) if a tool can't start (missing shared lib...)
+          for t in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do
+            "$HOME/llvm/bin/$t" --version >/dev/null || { echo "::error::$t does not run"; ldd "$HOME/llvm/bin/$t" | grep 'not found'; exit 1; }
           done
-          { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
-          { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS silentoldconfig || true
+          echo "TOOLCHAIN=$("$HOME/llvm/bin/clang" --version | head -n1)" >> "$GITHUB_ENV"
 
-          cp out/.config "arch/arm64/configs/${DEVICE}_stock_defconfig"
-          cp out/.config "arch/arm64/configs/${DEVICE}_defconfig"
-          rm -rf out
-          echo "FINAL_DEFCONFIG=arch/arm64/configs/${DEVICE}_defconfig" >> "$GITHUB_ENV"
-          echo "COMPILE_DEFCONFIG=${DEVICE}_defconfig" >> "$GITHUB_ENV"
-          sed -i "s|\$(KCONFIG_CONFIG)|arch/arm64/configs/${DEVICE}_stock_defconfig|g" kernel/Makefile
-
-      - name: Device patches (as in perf_neon)
+      - name: Kernel tweaks (no -dirty suffix)
         working-directory: ${{ env.KERNEL_DIR }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Revert the KernelSU already integrated in the Mi-Thorium tree (otherwise it conflicts with OriginSU)
-          curl -sL --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.patch" \
-            https://api.github.com/repos/Mi-Thorium/kernel_msm-4.19/commits/624875e8edc36ae280b1f8efc1d3c48a28da64ea \
-            -o /tmp/ksu_revert.patch
-          patch -R -s -p1 < /tmp/ksu_revert.patch
-
-          sed -i "s/printf '%s' -dirty/:/g" scripts/setlocalversion
-          sed -i 's/CONFIG_IKHEADERS=y/# CONFIG_IKHEADERS is not set/g' "$FINAL_DEFCONFIG"
-          cat >> "$FINAL_DEFCONFIG" <<'EOF'
-          CONFIG_LTO_CLANG=y
-          CONFIG_THINLTO=y
-          CONFIG_MODULE_REL_CRCS=y
-          CONFIG_SECURITY_SELINUX_DEVELOP=y
-          CONFIG_DM_CRYPT=y
-          CONFIG_DM_DEFAULT_KEY=y
-          CONFIG_DM_SNAPSHOT=y
-          CONFIG_DM_UEVENT=y
-          CONFIG_DM_VERITY=y
-          CONFIG_DM_VERITY_FEC=y
-          CONFIG_DM_BOW=y
+          sed -i "s/printf '%s' -dirty/:/g" scripts/setlocalversion 2>/dev/null || true
+          : > "$RUNNER_TEMP/builder.config"     # config fragment filled by the next steps
+          # TCP BBR (Google): built in and default congestion control. The stock defconfig only
+          # has BIC (default)/CUBIC/Westwood/HTCP. CUBIC stays available:
+          #   sysctl -w net.ipv4.tcp_congestion_control=cubic
+          cat >> "$RUNNER_TEMP/builder.config" <<'EOF'
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_DEFAULT_BBR=y
+          CONFIG_DEFAULT_TCP_CONG="bbr"
           EOF
-          sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
+          sed -i 's/^ *//' "$RUNNER_TEMP/builder.config"
+          echo "FRAG=$RUNNER_TEMP/builder.config" >> "$GITHUB_ENV"
 
-          # Warnings that break the build with recent Clang
-          sed -i 's/-Wno-format-security/-Wno-format-security -Wno-declaration-after-statement -Wno-implicit-int -Wno-enum-conversion -Wno-default-const-init-var-unsafe -Wno-default-const-init-field-unsafe -Wno-misleading-indentation -Wno-unsequenced -Wno-sizeof-pointer-memaccess -Wno-implicit-function-declaration -Wno-implicit-enum-enum-cast/g' Makefile
-          sed -i '/export KBUILD_CFLAGS/i KBUILD_CFLAGS += -mllvm -polly -mllvm -enable-gvn-hoist -Wno-unused-command-line-argument' Makefile
-
-      - name: Integrate OriginSU (instead of BakaSU)
+      - name: Integrate OriginSU (replacing KernelSU-Next)
+        if: env.ROOT == 'originsu'
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          NONGKI=https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches
+          # 1) Drop KSU-Next (submodule) and set up OriginSU (./KernelSU + drivers/kernelsu symlink)
+          rm -rf KernelSU-Next KernelSU drivers/kernelsu
 
-          # 1) Set up OriginSU (clone into ./KernelSU + drivers/kernelsu symlink)
+          # 1b) Optional SuSFS upgrade (in-tree v2.3.0 -> v2.4.0), before OriginSU and the hooks
+          if [ "$HOOK_MODE" = "susfs" ] && [ "$SUSFS_VERSION" = "v2.4.0" ]; then
+            bash "$GITHUB_WORKSPACE/builder/scripts/susfs_v2.4.sh" "$GITHUB_WORKSPACE/builder/scripts"
+          fi
+
           curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
             | bash -s "$ORIGINSU_TAG"
-
-          # 1b) OriginSU non-GKI fix: ksud_integration.c calls ksu_preinit_release()
-          #     but only includes preinit.h in Tracepoint/Tamper mode (GKI). In SuSFS/Manual
-          #     mode the inline stub (KSU_NO_PREINIT) is not seen -> "undefined symbol" at link time.
-          F=KernelSU/kernel/runtime/ksud_integration.c
-          if [ -f "$F" ] && grep -q 'ksu_preinit_release' "$F" && \
-             ! sed -n '1,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/p' "$F" | grep -q '^#include "preinit/preinit.h"'; then
-            sed -i '0,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/s//#include "preinit\/preinit.h" \/\/ fix non-GKI link\n&/' "$F"
-            echo "-> preinit.h included unconditionally in $F"
-          fi
-
-          # 2) Common configs (same symbols as BakaSU)
-          cat >> "$FINAL_DEFCONFIG" <<'EOF'
-          CONFIG_KSU=y
-          CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
-          CONFIG_HAVE_SYSCALL_TRACEPOINTS=y
-          CONFIG_THREAD_INFO_IN_TASK=y
-          EOF
-          if [ "$KPM" = "true" ]; then
-            echo "CONFIG_KPM=y" >> "$FINAL_DEFCONFIG"
-          fi
-
-          if [ "$HOOK_MODE" = "susfs" ]; then
-            # 3a) SUSFS: kernel patch + SUSFS inline hooks
-            curl -LSs --fail --retry 3 "$NONGKI/Patch/susfs_patch_to_${KERNEL_VERSION}.patch" | patch -p1 -s --fuzz=5 || true
-            cat >> "$FINAL_DEFCONFIG" <<'EOF'
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          EOF
-            # 4.19 fix from perf_neon (fs/namespace.c)
-            sed -i 's|^[[:space:]]*mnt = alloc_vfsmnt(fc->source ?: "none");|#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tif (static_branch_unlikely(\&susfs_is_sdcard_android_data_not_decrypted)) {\n\t\tif (susfs_is_current_ksu_domain()) {\n\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?:"none");\n\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n\tmnt = alloc_vfsmnt(fc->source ?: "none");\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif|' fs/namespace.c
-            HOOK_SCRIPT="$NONGKI/susfs_inline_hook_patches.sh"
-          else
-            # 3b) Manual hook
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$FINAL_DEFCONFIG"
-            HOOK_SCRIPT="$NONGKI/syscall_hook_patches.sh"
-          fi
-          sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
-
-          # 4) Hooks in the kernel sources
-          curl -LSs --fail --retry 3 "$HOOK_SCRIPT" | bash
-
-          # 5) 4.19 fix from perf_neon (fs/stat.c)
-          sed -i 's/ksu_handle_stat(&dfd, &fname, &flag);/ksu_handle_stat(\&dfd, \&fname, \&flags);/g' fs/stat.c
-
-          # 6) Export static SELinux symbols
-          unstatic() { [ -f "$1" ] && grep -q "static $2" "$1" && sed -i "s/static $2/$2/" "$1" && echo "  exported: $2" || true; }
-          unstatic security/selinux/selinuxfs.c   'ssize_t (\*write_op\[\])'
-          unstatic security/selinux/selinuxfs.c   'ssize_t (\*const write_op\[\])'
-          unstatic security/selinux/selinuxfs.c   'const struct file_operations sel_handle_status_ops'
-          unstatic security/selinux/selinuxfs.c   'DEFINE_MUTEX(sel_mutex);'
-          unstatic security/selinux/ss/status.c   'struct page \*selinux_status_page;'
-          unstatic security/selinux/ss/status.c   'DEFINE_MUTEX(selinux_status_lock);'
-          unstatic security/selinux/ss/services.c 'DEFINE_RWLOCK(policy_rwlock);'
-          unstatic security/selinux/ss/services.c 'void security_dump_masked_av'
-          unstatic security/selinux/ss/services.c 'void context_struct_compute_av'
-
+          [ -e drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu missing after setup.sh"; exit 1; }
           sed -i 's/\$(KSU_COMMIT_SHA)-dirty/$(KSU_COMMIT_SHA)/' KernelSU/kernel/Kbuild 2>/dev/null || true
 
+          # 2) OriginSU source compat for 4.14 + adapt the tree's KSU-Next hooks to OriginSU
+          bash "$GITHUB_WORKSPACE/builder/scripts/originsu_compat_4.14.sh"
+          bash "$GITHUB_WORKSPACE/builder/scripts/originsu_hooks_4.14.sh"
+
+          # 3) Config. The hook method is a Kconfig choice whose default (tracepoint) is GKI-only,
+          #    so one of KSU_SUSFS / KSU_MANUAL_HOOK must be selected explicitly.
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y"
+            echo "# CONFIG_KSU_DEBUG is not set"
+            if [ "$KPM" = "true" ]; then echo "CONFIG_KPM=y"; else echo "# CONFIG_KPM is not set"; fi
+            if [ "$HOOK_MODE" = "susfs" ]; then
+              echo "# CONFIG_KSU_MANUAL_HOOK is not set"
+              echo "CONFIG_KSU_SUSFS=y"
+              for o in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS \
+                       SPOOF_CMDLINE_OR_BOOTCONFIG OPEN_REDIRECT SUS_MAP; do
+                echo "CONFIG_KSU_SUSFS_${o}=y"
+              done
+            else
+              echo "# CONFIG_KSU_SUSFS is not set"
+              echo "CONFIG_KSU_MANUAL_HOOK=y"
+            fi
+          } >> "$FRAG"
+
       - name: Extra features — Baseband Guard, NoMount, Droidspaces
+        if: env.EXTRA_FEATURES == 'true'
         working-directory: ${{ env.KERNEL_DIR }}
-        # Ported from riarumoda/perf_neon-builder scripts/goodies/{baseband,nomount,droidspaces}.sh
-        # (the same three features the base project enables for devices/mi89x7/mithorium.conf).
-        # Runs after OriginSU, for both the susfs and manual matrix legs.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/extra_features.sh" "$FRAG"
+
+      - name: Configure (defconfig + fragment, as FreeRunner's build.sh)
+        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          ########## 1) Baseband Guard (vc-teahouse) ##########
-          echo "== Baseband Guard =="
-          BBG_SETUP_URI="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
-          curl -LSs --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" "$BBG_SETUP_URI" | bash \
-            || { echo "::error::Baseband Guard setup failed"; exit 1; }
-          echo "CONFIG_BBG=y" >> "$FINAL_DEFCONFIG"
-          sed -i 's|^REPO_LINK :=.*|REPO_LINK := https://github.com/vc-teahouse/Baseband-guard|' Baseband-guard/Makefile
-
-          # Register baseband_guard as an LSM when the kernel supports the stacked-LSM list
-          # (DEFINE_LSM only exists on >=5.1; on this 4.19 tree this block is simply skipped).
-          if grep -q "#define DEFINE_LSM(lsm)" "include/linux/lsm_hooks.h" 2>/dev/null; then
-            if grep -q "^CONFIG_LSM=" "$FINAL_DEFCONFIG"; then
-              sed -i 's/^\(CONFIG_LSM=".*\)"/\1,baseband_guard"/' "$FINAL_DEFCONFIG"
-              echo "-- appended baseband_guard to existing CONFIG_LSM"
-            else
-              echo 'CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' >> "$FINAL_DEFCONFIG"
-              echo "-- added default CONFIG_LSM with baseband_guard"
-            fi
+          make O=out ARCH=arm64 LLVM=1 "exynos9820-${DEVICE}_defconfig"
+          if [ -s "$FRAG" ]; then
+            echo "--- fragment ---"; cat "$FRAG"
+            ARCH=arm64 scripts/kconfig/merge_config.sh -O out out/.config "$FRAG"
+            make O=out ARCH=arm64 LLVM=1 olddefconfig
+            # Fail early if a requested option did not stick (missing dependency, typo...)
+            MISS=0
+            while read -r l; do
+              case "$l" in CONFIG_*=*) grep -qxF "$l" out/.config || { echo "::warning::not applied: $l"; MISS=1; };; esac
+            done < "$FRAG"
+            for k in CONFIG_KSU=y CONFIG_KSU_SUSFS=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_BBG=y CONFIG_NOMOUNT=y; do
+              grep -qxF "$k" "$FRAG" && ! grep -qxF "$k" out/.config && { echo "::error::$k requested but not set"; exit 1; }
+            done
           fi
-
-          # Quirk: drop BBG's duplicate task_security_struct helper when SELinux already defines it
-          if grep -q "struct[[:space:]]\+task_security_struct[[:space:]]\+\*selinux_cred" "security/selinux/include/objsec.h" 2>/dev/null; then
-            echo "-- removing duplicate task_security_struct definition"
-            sed -i '/static inline struct task_security_struct \*selinux_cred/,/[[:space:]]*}/d' security/baseband-guard/tracing/tracing.c
-          fi
-
-          ########## 2) NoMount (maxsteeel) ##########
-          echo "== NoMount =="
-          NOMOUNT_SETUP_URI="https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh"
-          NOMOUNT_SETUP_BRANCH="v2.3.0-720"
-          curl -LSs --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" "$NOMOUNT_SETUP_URI" | bash -s "$NOMOUNT_SETUP_BRANCH" \
-            || { echo "::error::NoMount setup failed"; exit 1; }
-          echo "CONFIG_NOMOUNT=y" >> "$FINAL_DEFCONFIG"
-
-          ########## 3) Droidspaces (ravindu644) ##########
-          echo "== Droidspaces =="
-          DROIDSPACES_XT_QTAGUID="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
-          DROIDSPACES_CGROUP="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
-          if [ -f "net/netfilter/xt_qtaguid.c" ]; then
-            echo "-- applying xt_qtaguid panic fix"
-            wget -qO- "$DROIDSPACES_XT_QTAGUID" | patch -s -p1 --fuzz=5 \
-              || { echo "::error::Droidspaces xt_qtaguid patch failed"; exit 1; }
-          fi
-          echo "-- applying cgroup prefix fix"
-          wget -qO- "$DROIDSPACES_CGROUP" | patch -s -p1 --fuzz=5 \
-            || { echo "::error::Droidspaces cgroup patch failed"; exit 1; }
-
-          cat >> "$FINAL_DEFCONFIG" <<'EOF'
-          CONFIG_SYSCTL=y
-          CONFIG_SYSVIPC=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_NAMESPACES=y
-          CONFIG_PID_NS=y
-          CONFIG_UTS_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_SECCOMP=y
-          CONFIG_SECCOMP_FILTER=y
-          CONFIG_CGROUPS=y
-          CONFIG_CGROUP_DEVICE=y
-          CONFIG_CGROUP_SCHED=y
-          CONFIG_FAIR_GROUP_SCHED=y
-          CONFIG_CGROUP_FREEZER=y
-          CONFIG_CGROUP_NET_PRIO=y
-          CONFIG_MEMCG=y
-          CONFIG_CFS_BANDWIDTH=y
-          CONFIG_CGROUP_PIDS=y
-          CONFIG_CGROUP_CPUACCT=y
-          CONFIG_DEVTMPFS=y
-          CONFIG_OVERLAY_FS=y
-          CONFIG_TMPFS_POSIX_ACL=y
-          CONFIG_TMPFS_XATTR=y
-          CONFIG_FW_LOADER=y
-          CONFIG_FW_LOADER_USER_HELPER=y
-          CONFIG_FW_LOADER_COMPRESS=y
-          CONFIG_NET_NS=y
-          CONFIG_VETH=y
-          CONFIG_BRIDGE=y
-          CONFIG_NETFILTER=y
-          CONFIG_BRIDGE_NETFILTER=y
-          CONFIG_NETFILTER_ADVANCED=y
-          CONFIG_NF_CONNTRACK=y
-          CONFIG_IP_NF_IPTABLES=y
-          CONFIG_IP_NF_FILTER=y
-          CONFIG_NF_NAT=y
-          CONFIG_NF_TABLES=y
-          CONFIG_IP_NF_TARGET_MASQUERADE=y
-          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
-          CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_NF_CONNTRACK_NETLINK=y
-          CONFIG_NF_NAT_REDIRECT=y
-          CONFIG_IP_ADVANCED_ROUTER=y
-          CONFIG_IP_MULTIPLE_TABLES=y
-          CONFIG_NF_CONNTRACK_IPV4=y
-          CONFIG_NF_NAT_IPV4=y
-          CONFIG_IP_NF_NAT=y
-          CONFIG_IPV6=y
-          CONFIG_IPV6_MULTIPLE_TABLES=y
-          CONFIG_IP6_NF_IPTABLES=y
-          CONFIG_IP6_NF_FILTER=y
-          CONFIG_IP6_NF_MANGLE=y
-          CONFIG_IP6_NF_NAT=y
-          CONFIG_IP6_NF_TARGET_MASQUERADE=y
-          CONFIG_NF_CONNTRACK_IPV6=y
-          CONFIG_NF_NAT_IPV6=y
-          CONFIG_MACVLAN=y
-          CONFIG_ANDROID_PARANOID_NETWORK=n
-          CONFIG_USER_NS=y
-          CONFIG_NETFILTER_XT_MATCH_COMMENT=y
-          CONFIG_NETFILTER_XT_MATCH_STATE=y
-          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
-          CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
-          CONFIG_NETFILTER_XT_MATCH_HL=y
-          CONFIG_NETFILTER_XT_TARGET_REJECT=y
-          CONFIG_IP_NF_TARGET_REJECT=y
-          CONFIG_NETFILTER_XT_TARGET_LOG=y
-          CONFIG_IP_NF_TARGET_ULOG=y
-          CONFIG_NETFILTER_XT_MATCH_RECENT=y
-          CONFIG_NETFILTER_XT_MATCH_LIMIT=y
-          CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
-          CONFIG_NETFILTER_XT_MATCH_OWNER=y
-          CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
-          CONFIG_NETFILTER_XT_MATCH_MARK=y
-          CONFIG_NETFILTER_XT_TARGET_MARK=y
-          CONFIG_IP_SET=y
-          CONFIG_IP_SET_HASH_IP=y
-          CONFIG_IP_SET_HASH_NET=y
-          CONFIG_NETFILTER_XT_SET=y
-          CONFIG_NETFILTER_NETLINK_QUEUE=y
-          CONFIG_NETFILTER_NETLINK_LOG=y
-          CONFIG_NETFILTER_XT_TARGET_NFLOG=y
-          EOF
-
-          # Strip any accidental leading whitespace the YAML block added (same as other steps)
-          sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
-
-          echo "--- Extra-feature configs now in defconfig ---"
-          grep -E '^CONFIG_(BBG|NOMOUNT|NAMESPACES|USER_NS|OVERLAY_FS)=' "$FINAL_DEFCONFIG" || true
+          echo "--- effective root configs ---"
+          grep -E '^(# )?CONFIG_(KSU|KPM|BBG|NOMOUNT)' out/.config || true
 
       - name: Compile the kernel
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          mkdir -p out
-          make O=out $MAKE_ARGS "$COMPILE_DEFCONFIG"
-          { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
-          echo "--- Effective OriginSU / feature configs ---"
-          grep -E '^CONFIG_(KSU|KPM|BBG|NOMOUNT)' out/.config || true
           set +e
-          make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
+          make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 2>&1 | tee build.log
           RC=${PIPESTATUS[0]}
           set -e
-
-          echo "--- Contents of out/arch/arm64/boot ---"
-          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(directory missing)"
-
-          if [ "$RC" -ne 0 ]; then
+          grep -E -- '^-- (OriginSU|You |SUSFS)' build.log | sort -u || true
+          if [ "$RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
             echo "::error::Build failed (make exit code $RC). First errors:"
-            grep -nE "error:|Error [0-9]|undefined reference|\*\*\*" build.log | head -n 40 || true
-            exit "$RC"
-          fi
-          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "::error::Build succeeded but no Image.gz-dtb was produced."
-            grep -E "APPENDED_DTB|CONFIG_BUILD_ARM64_DT_OVERLAY|CONFIG_ARCH_MSM8937" out/.config || true
+            grep -nE "error:|Error [0-9]|undefined reference|undefined symbol|\*\*\*" build.log | head -n 40 || true
             exit 1
           fi
 
@@ -451,7 +287,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ matrix.hook_mode }}
+          name: build-log-${{ matrix.device }}
           path: |
             ${{ env.KERNEL_DIR }}/build.log
             ${{ env.KERNEL_DIR }}/out/.config
@@ -459,37 +295,59 @@ jobs:
 
       - name: Package with AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/riarumoda/AnyKernel3 AnyKernel3
-          rm -rf AnyKernel3/.git
-          cp "$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
-          sed -i 's/supported.versions=11-16/supported.versions=11-17/' AnyKernel3/anykernel.sh
-          sed -i 's/sweet (sm6150)/ mi89x7 (MSM8937) OriginSU/g' AnyKernel3/banner
-          sed -i 's/device.name1=sweet/device.name1=mi8937/' AnyKernel3/anykernel.sh
-          sed -i 's/device.name2=sweetin/device.name2=mi8917/' AnyKernel3/anykernel.sh
-          sed -i '/device.name2=mi8917/a device.name3=santoni\ndevice.name4=prada\ndevice.name5=rolex\ndevice.name6=ugglite\ndevice.name7=riva\ndevice.name8=ugg\ndevice.name9=land' AnyKernel3/anykernel.sh
-          cd AnyKernel3
-          ZIP="MSM8937-OriginSU-${ORIGINSU_TAG}-${HOOK_MODE}-$(date +%Y%m%d).zip"
-          zip -rq9 "../$ZIP" ./*
-          cd ..
-          mkdir -p dist
-          mv "$ZIP" dist/
-          cp "$KERNEL_DIR/out/.config" "dist/config-${HOOK_MODE}.txt"
-          cp "$KERNEL_DIR/build.log"   "dist/build-${HOOK_MODE}.log"
-          echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse --short HEAD)" > "dist/info-${HOOK_MODE}.txt"
-          echo "KERNEL_RELEASE=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null)" >> "dist/info-${HOOK_MODE}.txt"
+          git clone --depth=1 "$AK3_REPO" AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image" AnyKernel3/Image
+          AK=AnyKernel3/anykernel.sh
+          case "$DEVICE" in
+            beyond0lte) MODEL="Galaxy S10e";; beyond1lte) MODEL="Galaxy S10";; beyond2lte) MODEL="Galaxy S10+";;
+            beyondx) MODEL="Galaxy S10 5G";; d1) MODEL="Galaxy Note10";; d1x) MODEL="Galaxy Note10 5G";;
+            d2s) MODEL="Galaxy Note10+";; d2x) MODEL="Galaxy Note10+ 5G";; f62) MODEL="Galaxy F62";; *) MODEL="$DEVICE";;
+          esac
+          if [ "$ROOT" = "originsu" ]; then FLAVOR="OriginSU-${ORIGINSU_TAG}-${HOOK_MODE}"; else FLAVOR="KSUNext-control"; fi
+          if [ "$ROOT" = "originsu" ] && [ "$HOOK_MODE" = "susfs" ]; then
+            FLAVOR="${FLAVOR}-$(grep -m1 '#define SUSFS_VERSION' "$KERNEL_DIR/include/linux/susfs.h" | cut -d'"' -f2)"
+          fi
+          sed -i -E '/^device\.name[0-9]+=/d' "$AK"
+          sed -i -E "s/^do\.devicecheck=.*/do.devicecheck=1\ndevice.name1=${DEVICE}/" "$AK"
+          sed -i -E "s|^kernel\.string=.*|kernel.string=FreeRunner ${MODEL} (${DEVICE}) — ${FLAVOR}|" "$AK"
 
-      - name: Upload artifacts
+          KREL=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null)
+          ZIP="exynos9820-${DEVICE}-${FLAVOR}$( [ "$EXTRA_FEATURES" = true ] && echo -extras)-$(date +%Y%m%d).zip"
+          (cd AnyKernel3 && zip -rq9 "../$ZIP" ./* -x '*.git*' 'README.md')
+          mkdir -p dist && mv "$ZIP" dist/
+          (cd dist && sha256sum "$ZIP" > "$ZIP.sha256")
+          cp "$KERNEL_DIR/out/.config" "dist/config-${DEVICE}.txt"
+          {
+            echo "KERNEL_COMMIT=$KERNEL_COMMIT"
+            echo "KERNEL_RELEASE=\"$KREL\""
+            echo "SUSFS_VERSION=$(grep -m1 '#define SUSFS_VERSION' "$KERNEL_DIR/include/linux/susfs.h" 2>/dev/null | cut -d'"' -f2)"
+            echo "TOOLCHAIN=\"$TOOLCHAIN\""
+          } > "dist/info-${DEVICE}.txt"
+
+      # GitHub always wraps an artifact in a zip on download. The flashable zip gets its own
+      # artifact: download it, unzip it once, and flash the zip found inside (has META-INF).
+      - name: Upload flashable zip
         uses: actions/upload-artifact@v4
         with:
-          name: MSM8937-OriginSU-${{ matrix.hook_mode }}
-          path: dist/*
+          name: FLASH-unzip-first-${{ matrix.device }}
+          path: dist/*.zip
+          compression-level: 0
+
+      - name: Upload checksums, config, info
+        uses: actions/upload-artifact@v4
+        with:
+          name: info-${{ matrix.device }}
+          path: |
+            dist/*.sha256
+            dist/config-*.txt
+            dist/info-*.txt
 
   # ------------------------------------------------------------------
   # 3) Publish the GitHub Release
   # ------------------------------------------------------------------
   release:
     needs: [check, build]
-    # Publishes even if only one of the two variants built
     if: >-
       !cancelled() && needs.check.outputs.build == 'true' &&
       (github.event_name == 'schedule' || inputs.publish)
@@ -500,33 +358,50 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: originsu-${{ needs.check.outputs.tag }}
       ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
+      KERNEL_BRANCH: ${{ needs.check.outputs.branch }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: "{FLASH-unzip-first-*,info-*}"
           merge-multiple: true
 
       - name: Write release notes
         run: |
-          source dist/info-susfs.txt 2>/dev/null || source dist/info-manual.txt
+          ls dist/*.zip >/dev/null 2>&1 || { echo "::error::No zip was built"; exit 1; }
+          source "$(ls dist/info-*.txt | head -1)"
+          DEVROWS=""
+          for z in $(ls dist/*.zip | sort); do
+            b=$(basename "$z"); dev=$(echo "$b" | sed -nE 's/^exynos9820-([a-z0-9]+)-.*/\1/p')
+            case "$dev" in
+              beyond0lte) m="Galaxy S10e";; beyond1lte) m="Galaxy S10";; beyond2lte) m="Galaxy S10+";;
+              beyondx) m="Galaxy S10 5G";; d1) m="Galaxy Note10";; d1x) m="Galaxy Note10 5G";;
+              d2s) m="Galaxy Note10+";; d2x) m="Galaxy Note10+ 5G";; f62) m="Galaxy F62";; *) m="$dev";;
+            esac
+            DEVROWS="${DEVROWS}| ${m} | \`${dev}\` | \`${b}\` |"$'\n'
+          done
           cat > notes.md <<EOF
-          ## MSM8937 kernel — OriginSU \`${ORIGINSU_TAG}\`
+          ## Exynos 9820 kernels (FreeRunner base) — OriginSU \`${ORIGINSU_TAG}\`
 
           | | |
           |---|---|
-          | OriginSU | [${ORIGINSU_TAG}](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}) |
-          | Kernel | Mi-Thorium \`mithorium/a13/master\` @ [\`${KERNEL_COMMIT}\`](https://github.com/Mi-Thorium/kernel_msm-4.19/commit/${KERNEL_COMMIT}) |
+          | OriginSU | [${ORIGINSU_TAG}](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}) (kernel + manager) |
+          | SuSFS | \`${SUSFS_VERSION:-n/a}\` (FreeRunner in-tree) |
+          | Kernel | FreeRunner \`${KERNEL_BRANCH}\` @ [\`${KERNEL_COMMIT}\`](https://github.com/Project-Matrixx-New/android_kernel_samsung_exynos9820/commit/${KERNEL_COMMIT}) |
           | Kernel version | \`${KERNEL_RELEASE}\` |
-          | Extra features | Baseband Guard · NoMount · Droidspaces |
+          | Toolchain | ${TOOLCHAIN} |
           | Build date | $(date -u +%Y-%m-%d) |
 
-          ### Which zip should I flash?
-          - **\`-susfs\`** — SuSFS inline hook: root + SuSFS hiding (recommended).
-          - **\`-manual\`** — Manual hook only: try this if the SuSFS build does not boot.
+          ### Which zip for my device?
+          Flash **only** the zip whose codename matches your phone:
 
-          Flash from TWRP / OrangeFox, then install the OriginSU manager from the
+          | Device | Codename | Zip |
+          |---|---|---|
+          ${DEVROWS}
+          > ⚠️ **Community rebuild — test before daily use.** Back up your stock \`boot\` first.
+
+          Flash from TWRP, then install the OriginSU manager from the
           [OriginSU release page](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}).
-          **Back up your stock \`boot\` partition first.**
           EOF
           sed -i 's/^          //' notes.md
 
@@ -534,6 +409,6 @@ jobs:
         run: |
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "MSM8937 OriginSU ${ORIGINSU_TAG}" \
+            --title "Exynos 9820 (FreeRunner) — OriginSU ${ORIGINSU_TAG}" \
             --notes-file notes.md --latest \
-            dist/*.zip dist/config-*.txt
+            dist/*.zip dist/*.sha256 dist/config-*.txt
