@@ -2,17 +2,19 @@ name: Build MSM8937 Kernel (Mi-Thorium) with OriginSU
 
 # Adapted from riarumoda/perf_neon-builder (.github/workflows/mithorium-msm8937.yml)
 # BakaSU replaced by OriginSU, same hook method (JackA1ltman NonGKI patches).
+#
+# OriginSU is discontinued: the project became KazeSU (https://github.com/KazeSU/KazeSU),
+# whose kernel code no longer supports this 4.19 tree. This builder is frozen on the
+# last OriginSU release, v4.3.0, kept in the KazeSU repository (tag v4.3.0, GitHub release
+# "legacy-v4.3.0"). No scheduled builds any more: run it manually to pick up kernel updates.
 
 on:
-  # Checks every Sunday (05:17 UTC) whether a new OriginSU release is out
-  schedule:
-    - cron: "17 5 * * 0"
   workflow_dispatch:
     inputs:
       originsu_ref:
-        description: "OriginSU tag to build (empty = latest release)"
+        description: "OriginSU tag to build (last OriginSU release: v4.3.0)"
         required: false
-        default: ""
+        default: "v4.3.0"
       kpm:
         description: "Enable CONFIG_KPM"
         type: boolean
@@ -44,7 +46,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # 1) Do we need to build? (new OriginSU version not released yet)
+  # 1) OriginSU version to build (manual runs only)
   # ------------------------------------------------------------------
   check:
     runs-on: ubuntu-latest
@@ -52,33 +54,20 @@ jobs:
       tag: ${{ steps.ver.outputs.tag }}
       build: ${{ steps.ver.outputs.build }}
     steps:
-      - name: Compare OriginSU latest release with our releases
+      - name: Select the OriginSU tag
         id: ver
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ inputs.originsu_ref }}"
-          if [ -z "$TAG" ]; then
-            TAG=$(gh release view --repo samakshkambxj/OriginSU --json tagName -q .tagName 2>/dev/null || true)
-          fi
-          if [ -z "$TAG" ]; then
-            # No published release: fall back to the most recent tag
-            TAG=$(gh api repos/samakshkambxj/OriginSU/tags -q '.[0].name')
-          fi
-          [ -n "$TAG" ] || { echo "::error::Could not determine the OriginSU version"; exit 1; }
+          TAG="${TAG:-v4.3.0}"
+          # OriginSU tags only (v4.x). KazeSU v1.x lives in the same repository
+          # but no longer builds on this kernel.
+          case "$TAG" in
+            v4.*) ;;
+            *) echo "::error::$TAG is not an OriginSU tag (expected v4.x, e.g. v4.3.0)"; exit 1 ;;
+          esac
           echo "OriginSU version: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual run -> forced build"
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          elif gh release view "originsu-$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release originsu-$TAG already published -> nothing to do"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "New version detected -> build"
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------------
   # 2) Build (SUSFS inline hook + manual hook)
@@ -94,9 +83,8 @@ jobs:
     env:
       ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
       HOOK_MODE: ${{ matrix.hook_mode }}
-      # KPM is off by default: only enabled when ticked on a manual run
-      # (scheduled runs have no inputs -> 'false')
-      KPM: ${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'false' }}
+      # KPM is off by default: only enabled when ticked
+      KPM: ${{ inputs.kpm }}
 
     steps:
       - name: Install build dependencies
@@ -198,14 +186,40 @@ jobs:
           sed -i 's/-Wno-format-security/-Wno-format-security -Wno-declaration-after-statement -Wno-implicit-int -Wno-enum-conversion -Wno-default-const-init-var-unsafe -Wno-default-const-init-field-unsafe -Wno-misleading-indentation -Wno-unsequenced -Wno-sizeof-pointer-memaccess -Wno-implicit-function-declaration -Wno-implicit-enum-enum-cast/g' Makefile
           sed -i '/export KBUILD_CFLAGS/i KBUILD_CFLAGS += -mllvm -polly -mllvm -enable-gvn-hoist -Wno-unused-command-line-argument' Makefile
 
+      - name: Network — TCP BBR + fq qdisc
+        working-directory: ${{ env.KERNEL_DIR }}
+        # Mi-Thorium's vendor/common.config already builds BBR and makes it the default
+        # (CONFIG_TCP_CONG_BBR=y + CONFIG_DEFAULT_BBR=y). We keep that explicit here so it
+        # cannot silently regress, and pair BBR with the fq qdisc: fq paces packets at the
+        # rate BBR computes, which is cheaper on the Cortex-A53 than TCP's internal
+        # hrtimer pacing (the fallback used when the qdisc is pfifo_fast) and keeps
+        # latency low on Wi-Fi and mobile data. The compile step checks the final .config.
+        run: |
+          cat >> "$FINAL_DEFCONFIG" <<'EOF'
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_DEFAULT_BBR=y
+          CONFIG_NET_SCHED=y
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_NET_SCH_FQ_CODEL=y
+          CONFIG_NET_SCH_DEFAULT=y
+          CONFIG_DEFAULT_FQ=y
+          EOF
+          sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
+
       - name: Integrate OriginSU (instead of BakaSU)
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           NONGKI=https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches
 
           # 1) Set up OriginSU (clone into ./KernelSU + drivers/kernelsu symlink)
-          curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
+          #    samakshkambxj/OriginSU now redirects to KazeSU/KazeSU, whose main branch is KazeSU:
+          #    take setup.sh from the OriginSU tag itself and clone the KazeSU URL directly.
+          curl -LSs --fail --retry 3 "https://raw.githubusercontent.com/KazeSU/KazeSU/$ORIGINSU_TAG/kernel/setup.sh" \
+            | sed 's|^REPO_URL=.*|REPO_URL="https://github.com/KazeSU/KazeSU"|' \
             | bash -s "$ORIGINSU_TAG"
+          [ "$(git -C KernelSU describe --tags --exact-match 2>/dev/null)" = "$ORIGINSU_TAG" ] \
+            || { echo "::error::OriginSU is not at $ORIGINSU_TAG"; git -C KernelSU log -1 --oneline; exit 1; }
 
           # 1b) OriginSU non-GKI fix: ksud_integration.c calls ksu_preinit_release()
           #     but only includes preinit.h in Tracepoint/Tamper mode (GKI). In SuSFS/Manual
@@ -428,6 +442,10 @@ jobs:
           { yes "" 2>/dev/null || true; } | make O=out $MAKE_ARGS olddefconfig
           echo "--- Effective OriginSU / feature configs ---"
           grep -E '^CONFIG_(KSU|KPM|BBG|NOMOUNT)' out/.config || true
+          echo "--- TCP congestion control / default qdisc ---"
+          grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_TCP_CONG|NET_SCH_FQ|NET_SCH_DEFAULT|DEFAULT_NET_SCH)=' out/.config || true
+          grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config || { echo "::error::BBR is not the default TCP congestion control"; exit 1; }
+          grep -q '^CONFIG_DEFAULT_NET_SCH="fq"' out/.config  || { echo "::error::fq is not the default qdisc"; exit 1; }
           set +e
           make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
           RC=${PIPESTATUS[0]}
@@ -491,8 +509,7 @@ jobs:
     needs: [check, build]
     # Publishes even if only one of the two variants built
     if: >-
-      !cancelled() && needs.check.outputs.build == 'true' &&
-      (github.event_name == 'schedule' || inputs.publish)
+      !cancelled() && needs.check.outputs.build == 'true' && inputs.publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -514,10 +531,10 @@ jobs:
 
           | | |
           |---|---|
-          | OriginSU | [${ORIGINSU_TAG}](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}) |
+          | OriginSU | [${ORIGINSU_TAG}](https://github.com/KazeSU/KazeSU/releases/tag/${ORIGINSU_TAG}) (final OriginSU release, now hosted by KazeSU as "legacy-${ORIGINSU_TAG}") |
           | Kernel | Mi-Thorium \`mithorium/a13/master\` @ [\`${KERNEL_COMMIT}\`](https://github.com/Mi-Thorium/kernel_msm-4.19/commit/${KERNEL_COMMIT}) |
           | Kernel version | \`${KERNEL_RELEASE}\` |
-          | Extra features | Baseband Guard · NoMount · Droidspaces |
+          | Extra features | Baseband Guard · NoMount · Droidspaces · TCP BBR + fq |
           | Build date | $(date -u +%Y-%m-%d) |
 
           ### Which zip should I flash?
@@ -525,7 +542,8 @@ jobs:
           - **\`-manual\`** — Manual hook only: try this if the SuSFS build does not boot.
 
           Flash from TWRP / OrangeFox, then install the OriginSU manager from the
-          [OriginSU release page](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}).
+          [legacy-${ORIGINSU_TAG} release page](https://github.com/KazeSU/KazeSU/releases/tag/${ORIGINSU_TAG})
+          (OriginSU manager, not the KazeSU v1.x one).
           **Back up your stock \`boot\` partition first.**
           EOF
           sed -i 's/^          //' notes.md
