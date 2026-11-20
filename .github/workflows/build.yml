@@ -87,6 +87,11 @@ jobs:
       KPM: ${{ inputs.kpm }}
 
     steps:
+      - name: Checkout builder scripts
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -207,6 +212,13 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' "$FINAL_DEFCONFIG"
 
+      - name: Shared optimizations
+        working-directory: ${{ env.KERNEL_DIR }}
+        # scripts/optimizations.sh is identical in msm8937-origin-builder and
+        # msm8937-KazeSU-builder (root-solution independent): power-efficient workqueues,
+        # zstd available for ZRAM, TTL/HL targets, vm.swappiness up to 200, -mcpu=cortex-a53.
+        run: bash "$GITHUB_WORKSPACE/builder/scripts/optimizations.sh" apply "$FINAL_DEFCONFIG"
+
       - name: Integrate OriginSU (instead of BakaSU)
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
@@ -322,12 +334,21 @@ jobs:
           fi
 
           ########## 2) NoMount (maxsteeel) ##########
+          # OriginSU v4.3.0 drives NoMount itself (OriginMount screen -> "NoMount" mode):
+          # ksud probes the built-in driver first and talks to it over the keyring protocol,
+          # which needs driver API >= 22 (NoMount v2.2.0+). v2.3.0 reports API 23 with the same
+          # wire structures, so it works with OriginSU. Do not install the upstream NoMount
+          # metamodule zip on top: OriginSU's built-in backend replaces it.
           echo "== NoMount =="
           NOMOUNT_SETUP_URI="https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh"
           NOMOUNT_SETUP_BRANCH="v2.3.0-720"
           curl -LSs --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" "$NOMOUNT_SETUP_URI" | bash -s "$NOMOUNT_SETUP_BRANCH" \
             || { echo "::error::NoMount setup failed"; exit 1; }
           echo "CONFIG_NOMOUNT=y" >> "$FINAL_DEFCONFIG"
+          NM_API="$(sed -n 's/^#define NOMOUNT_BASE_VERSION "\([0-9]*\)".*/\1/p' fs/nomount/nomount.h)"
+          echo "-- NoMount driver API: ${NM_API:-unknown}"
+          [ -n "$NM_API" ] && [ "$NM_API" -ge 22 ] \
+            || { echo "::error::NoMount API ${NM_API:-unknown} < 22: OriginSU v4.3.0 would refuse the driver"; exit 1; }
 
           ########## 3) Droidspaces (ravindu644) ##########
           echo "== Droidspaces =="
@@ -446,6 +467,7 @@ jobs:
           grep -E '^CONFIG_(TCP_CONG_BBR|DEFAULT_TCP_CONG|NET_SCH_FQ|NET_SCH_DEFAULT|DEFAULT_NET_SCH)=' out/.config || true
           grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config || { echo "::error::BBR is not the default TCP congestion control"; exit 1; }
           grep -q '^CONFIG_DEFAULT_NET_SCH="fq"' out/.config  || { echo "::error::fq is not the default qdisc"; exit 1; }
+          bash "$GITHUB_WORKSPACE/builder/scripts/optimizations.sh" verify out/.config
           set +e
           make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
           RC=${PIPESTATUS[0]}
@@ -523,6 +545,17 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Fetch the OriginSU manager APK
+        # The manager must match the kernel: take it from the same OriginSU tag
+        # (KazeSU/KazeSU release "legacy-<tag>"). arm64-v8a only: every Mi-Thorium 4.19 ROM is arm64.
+        run: |
+          gh release download "$ORIGINSU_TAG" --repo KazeSU/KazeSU \
+            --pattern 'OriginSU_*-arm64-v8a-release.apk' --dir dist
+          APK="$(ls dist/OriginSU_*-arm64-v8a-release.apk 2>/dev/null | head -n1)"
+          [ -n "$APK" ] || { echo "::error::OriginSU manager APK not found in KazeSU/KazeSU release $ORIGINSU_TAG"; exit 1; }
+          echo "MANAGER_APK=$(basename "$APK")" >> "$GITHUB_ENV"
+          echo "-> $(basename "$APK") ($(du -h "$APK" | cut -f1))"
+
       - name: Write release notes
         run: |
           source dist/info-susfs.txt 2>/dev/null || source dist/info-manual.txt
@@ -535,16 +568,22 @@ jobs:
           | Kernel | Mi-Thorium \`mithorium/a13/master\` @ [\`${KERNEL_COMMIT}\`](https://github.com/Mi-Thorium/kernel_msm-4.19/commit/${KERNEL_COMMIT}) |
           | Kernel version | \`${KERNEL_RELEASE}\` |
           | Extra features | Baseband Guard · NoMount · Droidspaces · TCP BBR + fq |
+          | Optimizations | power-efficient workqueues · zstd for ZRAM (optional) · TTL/HL targets · \`vm.swappiness\` up to 200 · Cortex-A53 tuning |
+          | Manager | \`${MANAGER_APK}\` (attached) |
           | Build date | $(date -u +%Y-%m-%d) |
 
           ### Which zip should I flash?
           - **\`-susfs\`** — SuSFS inline hook: root + SuSFS hiding (recommended).
           - **\`-manual\`** — Manual hook only: try this if the SuSFS build does not boot.
 
-          Flash from TWRP / OrangeFox, then install the OriginSU manager from the
-          [legacy-${ORIGINSU_TAG} release page](https://github.com/KazeSU/KazeSU/releases/tag/${ORIGINSU_TAG})
-          (OriginSU manager, not the KazeSU v1.x one).
+          Flash from TWRP / OrangeFox, then install the attached **OriginSU manager**
+          (\`${MANAGER_APK}\`, same version as the kernel — not the KazeSU v1.x manager).
           **Back up your stock \`boot\` partition first.**
+
+          ### Modules
+          OriginSU mounts modules itself: pick the mode in the manager's **OriginMount** screen.
+          **NoMount** is built into this kernel (no real mounts, nothing in \`/proc/mounts\`);
+          do not install the separate NoMount module zip on top of it.
           EOF
           sed -i 's/^          //' notes.md
 
@@ -554,4 +593,4 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "MSM8937 OriginSU ${ORIGINSU_TAG}" \
             --notes-file notes.md --latest \
-            dist/*.zip dist/config-*.txt
+            dist/*.zip dist/*.apk dist/config-*.txt
