@@ -8,7 +8,7 @@
 > OriginSU has been renamed and rebuilt as **[KazeSU](https://github.com/KazeSU/KazeSU)**, so `v4.3.0` is the final OriginSU release and this builder is frozen on it (no automatic builds; it is only re-run by hand to pick up kernel fixes).
 > **All future kernels will be published in the new repository: [msm8937-KazeSU-builder](https://github.com/1992Ade/msm8937-KazeSU-builder).**
 >
-> The OriginSU `v4.3.0` code and manager remain available in the KazeSU repository ([tag `v4.3.0`, release "legacy-v4.3.0"](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0)). Keep using these OriginSU builds until KazeSU kernels are available for MSM8937, or if you need SuSFS features that KazeSU does not have.
+> The OriginSU `v4.3.0` code and manager remain available in the KazeSU repository ([tag `v4.3.0`, release "legacy-v4.3.0"](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0)). Keep using these OriginSU builds until KazeSU kernels are available for MSM8937, or if you need SuSFS features that KazeSU does not have. Note that KazeSU `v1.0.0` works with this kernel too but new root hiding method is not implemented.
 
 > **Your warranty is now void.** Flashing a custom kernel can brick your device. You are responsible for what you flash. Always keep a backup of your stock `boot` partition.
 
